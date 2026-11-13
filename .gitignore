@@ -1,3 +1,12 @@
 node_modules/
 dist/
+.build/
 *.asar
+# notes and settings made when running from source
+/projects/
+/backups/
+/images/
+/repos/
+/mcp/
+/update/
+/settings.json

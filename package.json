@@ -8,5 +8,13 @@
   "license": "UNLICENSED",
   "dependencies": {
     "isomorphic-git": "^1.44.12"
+  },
+  "scripts": {
+    "start": "electron .",
+    "pack": "node tools/pack.js"
+  },
+  "devDependencies": {
+    "@electron/asar": "^4.3.2",
+    "electron": "^45.2.3"
   }
 }

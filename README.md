@@ -16,9 +16,11 @@ Your notes stay on your PC, in `Documents\Mindview`.
 
 Mods and themes published in [`mods/`](mods) appear in Mindview under **Mods > Library**.
 
-## Build from source
+## Change it
 
 ```
 npm ci
-npx @electron/packager . Mindview --platform=win32 --arch=x64 --electron-version=45.2.3 --icon=src/icon.ico --asar
+npm start
 ```
+
+Agents and developers: see [AGENTS.md](AGENTS.md) for where everything is and how to build and publish.
