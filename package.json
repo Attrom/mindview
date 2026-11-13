@@ -1,0 +1,12 @@
+{
+  "name": "mindview",
+  "productName": "Mindview",
+  "version": "1.0.0",
+  "description": "Mindview: trees of notes on a zoomable canvas",
+  "main": "src/main.js",
+  "author": "Attrom",
+  "license": "UNLICENSED",
+  "dependencies": {
+    "isomorphic-git": "^1.44.12"
+  }
+}
