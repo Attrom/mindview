@@ -4,7 +4,7 @@ Trees of notes on a zoomable canvas. A portable Windows app: nothing to install.
 
 ## Get it
 
-1. Download **Mindview.zip** from the [latest release](https://github.com/Attrom/mindview/releases/latest).
+1. Download [**Mindview.zip**](https://github.com/Attrom/mindview/releases/latest/download/Mindview.zip).
 2. Unzip it anywhere.
 3. Open `Mindview.exe`. Windows may warn the first time: choose **More info**, then **Run anyway**.
 
