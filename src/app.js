@@ -7,7 +7,7 @@
 const COLORS = [
   { key: 'none',   name: 'Plain',  dark: null,      light: null },
   { key: 'amber',  name: 'Amber',  dark: '#e8b04b', light: '#d1961f' },
-  { key: 'red',    name: 'Red',    dark: '#e5675c', light: '#d4483c' },
+  { key: 'red',    name: 'Red',    dark: '#ef4444', light: '#dc2626' },
   { key: 'pink',   name: 'Pink',   dark: '#e07ab0', light: '#cc5592' },
   { key: 'violet', name: 'Violet', dark: '#9d86f0', light: '#7a5fe0' },
   { key: 'blue',   name: 'Blue',   dark: '#5b9cf0', light: '#3a7fdc' },
@@ -92,8 +92,11 @@ const N = id => doc.nodes[id];
 const all = () => Object.values(doc.nodes);
 const childrenOf = id => all().filter(n => n.parentId === id).sort((a, b) => a.y - b.y || a.x - b.x);
 const roots = () => all().filter(n => !n.parentId || !N(n.parentId));
+// a note with a link attached is blue unless it was given a colour (or set to plain) by hand; blue is not in the note picker
+const colorKey = n => (n.url && !n.linkPlain && (!n.color || n.color === 'none')) ? 'blue' : n.color;
+const paintNote = (n, c) => { if (c === 'blue' && !n.url) return; if (c !== 'blue') delete n.preLink; n.color = c === 'blue' ? 'none' : c; if (c === 'none' && n.url) n.linkPlain = true; else delete n.linkPlain; }; // blue = the link's own colour
 const colorOf = n => {
-  const c = COLORS.find(c => c.key === n.color);
+  const c = COLORS.find(c => c.key === colorKey(n));
   return c ? c[uiTheme] : null;
 };
 function descendants(id, out = []) {
@@ -766,7 +769,7 @@ jumpMenu.addEventListener('click', e => {
   const from = jumpMenu.dataset.from;
   jumpMenu.hidden = true;
   if (b.dataset.moditem) { const it = modMenuItems().find(x => x.key === b.dataset.moditem); if (it && N(from)) { try { it.run(N(from)); } catch (err) { console.error('mod menu', err); } } return; }
-  if (b.dataset.unlinkurl) { const n = N(from); if (n && n.url) { checkpoint(); delete n.url; render(); scheduleSave(); toast('Link removed'); } return; }
+  if (b.dataset.unlinkurl) { const n = N(from); if (n && n.url) { checkpoint(); delete n.url; if (n.preLink && !n.linkPlain && (!n.color || n.color === 'none')) n.color = n.preLink; delete n.preLink; delete n.linkPlain; render(); scheduleSave(); toast('Link removed'); } return; }
   if (b.dataset.copylink) { copyText(noteLink(from)); toast('Link copied: paste it onto a note to make that note a shortcut here'); return; }
   if (b.dataset.jump) focusNote(b.dataset.jump, from);
   else if (b.dataset.unlink) {
@@ -878,7 +881,8 @@ function updateToolbar() {
     b.disabled = tree;
   }
   $('#nt-sizes').title = tree ? 'Notes in a tree are sized by their level' : '';
-  for (const b of toolbar.querySelectorAll('[data-color]')) b.classList.toggle('active', b.dataset.color === (n.color || 'none'));
+  for (const b of toolbar.querySelectorAll('[data-color]')) b.classList.toggle('active', b.dataset.color === (colorKey(n) || 'none'));
+  toolbar.querySelector('[data-color="blue"]').hidden = !n.url; // blue is offered only to notes with a link
   const hasKids = childrenOf(n.id).length > 0;
   const col = $('#nt-collapse');
   col.disabled = !hasKids;
@@ -1013,6 +1017,7 @@ bodyText.addEventListener('input', () => {
 bodyText.addEventListener('keydown', e => {
   e.stopPropagation();
   if (e.key === 'Escape') { e.preventDefault(); bodyText.blur(); }
+  if (e.key === 'Tab') { e.preventDefault(); const id = bodyFor; if (e.shiftKey && id && N(id)) { bodyText.blur(); startEditing(id, false); } } // Shift+Tab: back to the title
 });
 bodyText.addEventListener('blur', () => { bodyDirty = false; });
 bodyPanel.addEventListener('pointerdown', e => e.stopPropagation());
@@ -1098,6 +1103,7 @@ document.addEventListener('paste', e => {
     e.preventDefault();
     const n = N(selectedId);
     checkpoint();
+    if (!n.url) { if (n.color && n.color !== 'none') n.preLink = n.color; n.color = 'none'; delete n.linkPlain; } // a new link turns the note blue; its old colour comes back if the link is removed
     n.url = /^www\./i.test(txt) ? 'https://' + txt : txt;
     render(); scheduleSave();
     toast(/^mindview:/i.test(n.url) ? 'Shortcut attached: clicking the note brings the linked note into focus' : 'Link attached: clicking the note opens it');
@@ -1350,7 +1356,7 @@ function setSize(id, s) {
   const n = N(id); if (!n || n.size === s || isTree(n)) return; // tree notes are sized by level
   checkpoint(); n.size = s; render(); relayout(); scheduleSave();
 }
-function setColor(id, c) { const n = N(id); if (!n || n.color === c) return; checkpoint(); n.color = c; render(); scheduleSave(); }
+function setColor(id, c) { const n = N(id); if (!n || (colorKey(n) || 'none') === c) return; checkpoint(); paintNote(n, c); render(); scheduleSave(); }
 // zoom in on a note just enough to show its children, centred on its branch
 function zoomToBranch(id, instant) {
   const n = N(id); if (!n) return;
@@ -2353,8 +2359,7 @@ nodesLayer.addEventListener('keydown', e => {
   if (e.key === 'Escape') { e.preventDefault(); commitEdit(); return; }
   if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); commitEdit(); if (N(id)) addSibling(id); return; }
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); commitEdit(); return; }
-  if (e.key === 'Tab') { e.preventDefault(); commitEdit(); if (N(id)) addChild(id); return; }
-  if (e.key === 'ArrowDown' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); commitEdit(); if (N(id)) { select(id); updateToolbar(); bodyText.focus(); } return; }
+  if ((e.key === 'Tab' && !e.shiftKey) || (e.key === 'ArrowDown' && (e.ctrlKey || e.metaKey))) { e.preventDefault(); commitEdit(); if (N(id)) { select(id); updateToolbar(); bodyText.focus(); const r = document.createRange(); r.selectNodeContents(bodyText); r.collapse(false); const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r); } return; }
 });
 nodesLayer.addEventListener('input', () => {
   if (!editingId) return;
@@ -2458,7 +2463,7 @@ toolbar.addEventListener('click', e => {
   const b = e.target.closest('button'); if (!b || !selectedId) return;
   const id = selectedId;
   if (b.dataset.size) setSize(id, b.dataset.size);
-  else if (b.dataset.color && multi.size > 1 && multi.has(id)) { checkpoint(); for (const m of multi) if (N(m)) N(m).color = b.dataset.color; render(); scheduleSave(); }
+  else if (b.dataset.color && multi.size > 1 && multi.has(id)) { checkpoint(); for (const m of multi) if (N(m)) paintNote(N(m), b.dataset.color); render(); scheduleSave(); }
   else if (b.dataset.color) setColor(id, b.dataset.color);
   else if (b.id === 'nt-child') addChild(id);
   else if (b.id === 'nt-collapse') toggleCollapse(id);
