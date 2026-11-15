@@ -137,7 +137,7 @@ body.desktop #titlebar { padding-right: 150px; }
 .node.sm { font-size: calc(13.5px * var(--s)); min-width: 7.7em; max-width: 17.6em; padding: .56em .88em; color: color-mix(in srgb, var(--text) 86%, var(--bg)); }
 .node.md { font-size: calc(16px * var(--s)); font-weight: 500; min-width: 9em; max-width: 17.9em; padding: .76em 1.03em; }
 .node.lg {
-  font-size: calc(21px * var(--s)); font-weight: 650; letter-spacing: -.01em;
+  font-size: calc(21px * var(--s)); font-weight: 500;
   min-width: 8.95em; max-width: 16.85em; padding: .84em 1.05em;
   border-width: calc(2px * var(--s)); border-radius: calc(13px * var(--s));
 }
@@ -941,3 +941,11 @@ body.ai-mode #viewport { box-shadow: inset 0 0 0 2px var(--accent); }
 .root-marker.tb::after { top: calc(100% + 8px); translate: 0 0; left: 0; right: auto; }
 .root-marker.tt::after { top: auto; bottom: calc(100% + 8px); translate: 0 0; left: 0; right: auto; }
 .root-marker.tl.tb::after, .root-marker.tl.tt::after { left: auto; right: 0; }
+
+/* a note in focus: the notes outside its branch step back */
+.node.dim { opacity: calc(var(--p, 1) * .5); }
+.node.dim:hover { opacity: var(--p, 1); }
+#edges path.dim { opacity: .28 !important; }
+
+/* folded away and faded: off the page, so there is nothing to lay out or paint */
+.node.gone { display: none; }

@@ -16,7 +16,7 @@ const COLORS = [
 ];
 const SIZES = ['sm', 'md', 'lg'];
 const GAP_X = 70, GAP_Y = 16, ROOT_GAP = 56;
-const MIN_K = 0.12, MAX_K = 3;
+const MIN_K = 0.12, MAX_K = 16; // deep levels are tiny: focusing one zooms far in
 
 const host = window.desktop || null;
 if (host) document.body.classList.add("desktop");
@@ -90,8 +90,32 @@ const toolbar = $('#node-toolbar');
 const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
 const N = id => doc.nodes[id];
 const all = () => Object.values(doc.nodes);
-const childrenOf = id => all().filter(n => n.parentId === id).sort((a, b) => a.y - b.y || a.x - b.x);
-const roots = () => all().filter(n => !n.parentId || !N(n.parentId));
+// While one of the big jobs runs (a redraw, a layout, a zoom step) the tree is looked up through an index built once
+// for that job, instead of searching every note again for each question. It lives only for the length of the job;
+// anything that adds, removes or re-parents notes calls touch() so a job in progress rebuilds it.
+let idx = null;
+const bySpot = (a, b) => a.y - b.y || a.x - b.x;
+function treeIndex() {
+  if (idx.kids) return idx;
+  const kids = new Map(), roots = [];
+  for (const id in doc.nodes) { const n = doc.nodes[id]; if (n.parentId && doc.nodes[n.parentId]) { const a = kids.get(n.parentId); if (a) a.push(n); else kids.set(n.parentId, [n]); } else roots.push(n); }
+  for (const a of kids.values()) a.sort(bySpot);
+  idx.kids = kids; idx.roots = roots; idx.depth = new Map(); idx.count = new Map(); idx.jumps = null;
+  return idx;
+}
+const touch = () => { if (idx) idx = {}; };
+const NONE = Object.freeze([]);
+function indexed(fn) { return function (...a) { if (idx) return fn.apply(this, a); idx = {}; try { return fn.apply(this, a); } finally { idx = null; } }; }
+const childrenOf = id => (idx ? (treeIndex().kids.get(id) || NONE).slice() : all().filter(n => n.parentId === id).sort(bySpot));
+const hasKids = id => (idx ? treeIndex().kids.has(id) : all().some(o => o.parentId === id));
+const roots = () => (idx ? treeIndex().roots.slice() : all().filter(n => !n.parentId || !N(n.parentId)));
+// how many notes hang under this one
+function countUnder(id) {
+  if (!idx) return descendants(id).length;
+  const t = treeIndex(); let c = t.count.get(id);
+  if (c === undefined) { c = 0; for (const k of t.kids.get(id) || NONE) c += 1 + countUnder(k.id); t.count.set(id, c); }
+  return c;
+}
 // a note with a link attached is blue unless it was given a colour (or set to plain) by hand; blue is not in the note picker
 const colorKey = n => (n.url && !n.linkPlain && (!n.color || n.color === 'none')) ? 'blue' : n.color;
 const paintNote = (n, c) => { if (c === 'blue' && !n.url) return; if (c !== 'blue') delete n.preLink; n.color = c === 'blue' ? 'none' : c; if (c === 'none' && n.url) n.linkPlain = true; else delete n.linkPlain; }; // blue = the link's own colour
@@ -105,6 +129,11 @@ function descendants(id, out = []) {
 }
 /* ---- zoom-based unfolding: deeper levels appear as you zoom in ---- */
 function depthOf(n) {
+  if (idx) {
+    const m = treeIndex().depth; let d = m.get(n.id);
+    if (d === undefined) { const p = n.parentId && N(n.parentId); d = p ? Math.min(99, depthOf(p) + 1) : 0; m.set(n.id, d); }
+    return d;
+  }
   let d = 0, p = n.parentId && N(n.parentId);
   while (p && d < 99) { d++; p = p.parentId && N(p.parentId); }
   return d;
@@ -144,9 +173,26 @@ function levelP(d, k = doc.view.k) {
 const maxDepthAt = k => { let d = 1; while (d < 60 && k > startZoom(d + 1)) d++; return d; };
 const maxDepth = () => (forcedDepth !== null ? forcedDepth : maxDepthAt(doc.view.k));
 let lastPointer = null; // where the cursor is, so zooming keeps that spot steady
-const pOf = n => levelP(depthOf(n));
+// A note in focus (focusBranch) shows just its children; their own children stay folded behind the +N badge
+// until that child is clicked (focusOpen). Selecting something else ends it; zooming by hand does not.
+let focusId = null; const focusOpen = new Set();
+let focusScroll = 0, focusScrollGoal = 0, focusScrollRaf = 0; // screen px the focused note's children are scrolled by
+// how unfolded the children of n are (0..1)
+function kidsP(n) {
+  const d = depthOf(n) + 1;
+  if (forcedDepth !== null || !focusId || !N(focusId)) return levelP(d);
+  const fd = depthOf(N(focusId));
+  if (d <= fd + 1) return levelP(d);
+  return d === fd + 2 && focusOpen.has(n.id) ? 1 : 0;
+}
+const pOf = n => (n.parentId && N(n.parentId) ? kidsP(N(n.parentId)) : levelP(0));
 const isHidden = n => pOf(n) < 1; // levels only show once fully unfolded
-const kidsHidden = n => levelP(depthOf(n) + 1) <= 0;
+const kidsHidden = n => kidsP(n) <= 0;
+function clearFocus() {
+  if (!focusId) return;
+  focusId = null; focusOpen.clear(); lastDepth = -1; focusScroll = focusScrollGoal = 0;
+  render(); relayout();
+}
 function isAncestor(a, b) { // is a an ancestor of b?
   let p = N(b) && N(b).parentId;
   while (p) { if (p === a) return true; p = N(p) && N(p).parentId; }
@@ -237,6 +283,7 @@ function restore(from, to) {
   if (editingSection) finishSectionLabel(false);
   const snap = JSON.parse(from.pop());
   if (snap && snap.n) { doc.nodes = snap.n; doc.links = snap.l || []; doc.sections = snap.s || {}; } else doc.nodes = snap;
+  touch();
   if (selectedId && !N(selectedId)) selectedId = null;
   if (selectedLink && !linkById(selectedLink)) selectedLink = null;
   if (selectedSection && !SEC(selectedSection)) selectedSection = null;
@@ -287,7 +334,7 @@ function applyView() {
     try { onZoomChange(); } finally { inZoomUpdate = false; }
     lastK = view().k;
     paintView();
-  }
+  } else if (cullAt && (Math.abs(view().x - cullAt.x) > CULL_PAD / 2 || Math.abs(view().y - cullAt.y) > CULL_PAD / 2)) drawEdges(); // moved far: other notes and lines come into reach
   positionToolbar();
   positionLinkToolbar();
   paintRootMarkers();
@@ -302,7 +349,7 @@ const CHILD_RATIO = 0.74, MIN_FONT = 7;
 // tree notes are sized by their level (root biggest); free-standing notes use S/M/L
 const TREE_PX = d => Math.max(8, 28 * Math.pow(0.74, d)); // each level about a quarter smaller than its parent
 const treeClass = d => (d === 0 ? 'lg' : d === 1 ? 'md' : 'sm');
-const isTree = n => !!(n.parentId && N(n.parentId)) || all().some(o => o.parentId === n.id);
+const isTree = n => !!(n.parentId && N(n.parentId)) || hasKids(n.id);
 function classOf(n, hasKids) {
   const inTree = (n.parentId && N(n.parentId)) || hasKids;
   return inTree ? treeClass(depthOf(n)) : n.size;
@@ -331,7 +378,7 @@ function applyScales(k, exact) {
     const el = els[id]; if (!el) continue;
     const old = scaleNow[id];
     if (old === undefined || exact ? old !== sc[id] : Math.abs(sc[id] / old - 1) > 0.008) {
-      scaleNow[id] = sc[id]; el.style.setProperty('--s', sc[id].toFixed(4)); changed.push(id);
+      scaleNow[id] = sc[id]; if (goneNow.has(id)) ; else el.style.setProperty('--s', sc[id].toFixed(4)); changed.push(id);
     }
   }
   paintText();
@@ -341,6 +388,7 @@ function applyScales(k, exact) {
 function paintText() {
   const k = view().k;
   for (const id in els) {
+    if (goneNow.has(id)) continue;
     const el = els[id], cls = el.classList.contains('lg') ? 'lg' : el.classList.contains('md') ? 'md' : 'sm';
     const px = (scaleNow[id] || 1) * BASE_PX[cls] * k;
     el.classList.toggle('notext', id !== editingId && id !== freshId && px < READ_PX * 0.9);
@@ -351,6 +399,7 @@ function paintLevels() {
     const el = els[n.id]; if (!el) continue;
     const pinned = n.id === editingId || n.id === freshId;
     const pv = pinned ? 1 : pOf(n) >= 1 ? 1 : 0; // a level pops in once fully unfolded (no half-faded stage)
+    if (goneNow.has(n.id)) continue; // off the page
     el.style.setProperty('--p', pv);
     el.classList.toggle('zhide', pv <= 0);
   }
@@ -381,7 +430,7 @@ function onZoomChange() {
   for (const id in pos) {
     const n = N(id); if (!n) continue;
     putAt(n, pos[id]);
-    if (els[id]) { els[id].style.left = n.x + 'px'; els[id].style.top = n.y + 'px'; }
+    if (!goneNow.has(id) && els[id]) { els[id].style.left = n.x + 'px'; els[id].style.top = n.y + 'px'; }
   }
   if (anchor) { // keep the note under the cursor still
     const after = centerOnScreen(anchor);
@@ -460,6 +509,7 @@ function boundsAtDepth(d) {
   return { x0, y0, x1, y1 };
 }
 function fitAll(animate = true) {
+  clearFocus();
   if (!all().length && !allSections().length) { animateView({ x: innerWidth / 2, y: innerHeight / 2, k: 1 }); return; }
   const pad = 80, top = 44;
   const W = innerWidth - pad * 2, H = innerHeight - top - pad * 2;
@@ -498,67 +548,73 @@ function ensureVisible(id) {
 
 /* ---------------- rendering ---------------- */
 
+// everything one note shows: its classes, colour, place, text and badges
+function renderNode(n, el) {
+  const kids = childrenOf(n.id);
+  const cls = classOf(n, kids.length > 0);
+  if (!el.classList.contains(cls)) { el.classList.remove('sm', 'md', 'lg'); el.classList.add(cls); }
+
+  el.classList.toggle('selected', n.id === selectedId);
+  el.classList.toggle('msel', multi.has(n.id));
+  const folded = kids.length > 0 && kidsP(n) < 1; // +N stays until the children have fully unfolded
+  el.classList.toggle('collapsed', folded);
+  const pv = n.id === editingId || n.id === freshId ? 1 : pOf(n) >= 1 ? 1 : 0;
+  el.style.setProperty('--p', pv);
+  el.classList.toggle('zhide', pv <= 0);
+  const c = colorOf(n);
+  if (c) el.style.setProperty('--c', c); else el.style.removeProperty('--c');
+  el.style.left = n.x + 'px';
+  el.style.top = n.y + 'px';
+  const t = el.firstChild;
+  if (n.id !== editingId && t.textContent !== n.text) t.textContent = n.text;
+  let fold = el.querySelector('.fold');
+  if (folded) {
+    if (!fold) { fold = document.createElement('div'); fold.className = 'fold'; el.appendChild(fold); }
+    const count = countUnder(n.id);
+    fold.textContent = '+' + count;
+    fold.title = `${count} more note${count > 1 ? 's' : ''}. Zoom in, or click to zoom into this branch`;
+  } else if (fold) fold.remove();
+  paintThumbs(el, n.images, 'note');
+  el.classList.toggle('has-url', !!n.url);
+  el.classList.toggle('has-imgs', !!(n.images && n.images.length));
+  let bm = el.querySelector('.body-mark');
+  const hasBody = !!(n.body && n.body.trim()), hasBodyImgs = false; // no marker for pictures kept in the body
+  el.classList.toggle('has-body', hasBody || hasBodyImgs);
+  if (hasBody || hasBodyImgs) {
+    if (!bm) { bm = document.createElement('div'); bm.className = 'body-mark'; el.appendChild(bm); }
+    const html = (hasBody ? '<svg viewBox="0 0 16 16"><path d="M4 5h8M4 8h8M4 11h5"/></svg>' : '') + (hasBodyImgs ? '<svg viewBox="0 0 16 16"><rect x="2.5" y="3.5" width="11" height="9" rx="1.5"/><path d="M3 11l3.2-3.2 2.3 2.3 1.6-1.6L13 11.5"/><circle cx="10.3" cy="6.3" r=".9"/></svg>' : '');
+    if (bm.dataset.k !== html) { bm.innerHTML = html; bm.dataset.k = html; }
+    bm.title = 'Has more ' + (hasBody && hasBodyImgs ? 'text and images' : hasBody ? 'text' : 'images') + ': click the note to see it';
+  } else if (bm) bm.remove();
+  const jumps = jumpTargets(n.id);
+  let jb = el.querySelector('.jump');
+  if (jumps.length) {
+    if (!jb) { jb = document.createElement('div'); jb.className = 'jump'; el.appendChild(jb); }
+    jb.innerHTML = '<svg viewBox="0 0 16 16"><path d="M6.5 9.5l3-3M7 4.5l1.2-1.2a2.5 2.5 0 013.5 3.5L10.5 8M9 11.5l-1.2 1.2a2.5 2.5 0 01-3.5-3.5L5.5 8"/></svg>' + (jumps.length > 1 ? `<span>${jumps.length}</span>` : '');
+    jb.title = jumps.length === 1 ? `Jump to “${firstLine(N(jumps[0]).text)}” (right-click for options)` : `${jumps.length} linked notes`;
+  } else if (jb) jb.remove();
+}
 function render() {
   const live = new Set();
   for (const n of all()) {
     live.add(n.id);
-    let el = els[n.id];
+    let el = els[n.id], made = false;
     if (!el) {
       el = document.createElement('div');
       el.className = 'node';
       el.dataset.id = n.id;
       el.innerHTML = '<div class="text" data-ph="Write something…"></div><div class="handle" title="Drag to connect, click to add"></div>';
-      nodesLayer.appendChild(el);
-      els[n.id] = el;
+      els[n.id] = el; made = true;
     }
-    const kids = childrenOf(n.id);
-    el.classList.remove('sm', 'md', 'lg');
-    el.classList.add(classOf(n, kids.length > 0));
-
-    el.classList.toggle('selected', n.id === selectedId);
-    el.classList.toggle('msel', multi.has(n.id));
-    const folded = kids.length > 0 && levelP(depthOf(n) + 1) < 1; // +N stays until the children have fully unfolded
-    el.classList.toggle('collapsed', folded);
-    const pv = n.id === editingId || n.id === freshId ? 1 : pOf(n) >= 1 ? 1 : 0;
-    el.style.setProperty('--p', pv);
-    el.classList.toggle('zhide', pv <= 0);
-    const c = colorOf(n);
-    if (c) el.style.setProperty('--c', c); else el.style.removeProperty('--c');
-    el.style.left = n.x + 'px';
-    el.style.top = n.y + 'px';
-    const t = el.firstChild;
-    if (n.id !== editingId && t.textContent !== n.text) t.textContent = n.text;
-    let fold = el.querySelector('.fold');
-    if (folded) {
-      if (!fold) { fold = document.createElement('div'); fold.className = 'fold'; el.appendChild(fold); }
-      const count = descendants(n.id).length;
-      fold.textContent = '+' + count;
-      fold.title = `${count} more note${count > 1 ? 's' : ''}. Zoom in, or click to zoom into this branch`;
-    } else if (fold) fold.remove();
-    paintThumbs(el, n.images, 'note');
-    el.classList.toggle('has-url', !!n.url);
-    el.classList.toggle('has-imgs', !!(n.images && n.images.length));
-    let bm = el.querySelector('.body-mark');
-    const hasBody = !!(n.body && n.body.trim()), hasBodyImgs = false; // no marker for pictures kept in the body
-    el.classList.toggle('has-body', hasBody || hasBodyImgs);
-    if (hasBody || hasBodyImgs) {
-      if (!bm) { bm = document.createElement('div'); bm.className = 'body-mark'; el.appendChild(bm); }
-      const html = (hasBody ? '<svg viewBox="0 0 16 16"><path d="M4 5h8M4 8h8M4 11h5"/></svg>' : '') + (hasBodyImgs ? '<svg viewBox="0 0 16 16"><rect x="2.5" y="3.5" width="11" height="9" rx="1.5"/><path d="M3 11l3.2-3.2 2.3 2.3 1.6-1.6L13 11.5"/><circle cx="10.3" cy="6.3" r=".9"/></svg>' : '');
-      if (bm.dataset.k !== html) { bm.innerHTML = html; bm.dataset.k = html; }
-      bm.title = 'Has more ' + (hasBody && hasBodyImgs ? 'text and images' : hasBody ? 'text' : 'images') + ': click the note to see it';
-    } else if (bm) bm.remove();
-    const jumps = jumpTargets(n.id);
-    let jb = el.querySelector('.jump');
-    if (jumps.length) {
-      if (!jb) { jb = document.createElement('div'); jb.className = 'jump'; el.appendChild(jb); }
-      jb.innerHTML = '<svg viewBox="0 0 16 16"><path d="M6.5 9.5l3-3M7 4.5l1.2-1.2a2.5 2.5 0 013.5 3.5L10.5 8M9 11.5l-1.2 1.2a2.5 2.5 0 01-3.5-3.5L5.5 8"/></svg>' + (jumps.length > 1 ? `<span>${jumps.length}</span>` : '');
-      jb.title = jumps.length === 1 ? `Jump to “${firstLine(N(jumps[0]).text)}” (right-click for options)` : `${jumps.length} linked notes`;
-    } else if (jb) jb.remove();
+    // folded away: it stays off the page untouched, and is drawn when it comes back (ungone)
+    if (made) goneNow.add(n.id); // off the page until cull() finds it in view
+    if (goneNow.has(n.id)) { if (pinnedNote(n.id)) ungone(n.id); continue; }
+    renderNode(n, el);
   }
   for (const id of Object.keys(els)) {
-    if (!live.has(id)) { if (els[id].contains(bodyPanel)) { bodyShell = null; bodyFor = null; bodyPanel.hidden = true; document.body.appendChild(bodyPanel); } els[id].remove(); delete els[id]; delete sizeCache[id]; }
+    if (!live.has(id)) { if (els[id].contains(bodyPanel)) { bodyShell = null; bodyFor = null; bodyPanel.hidden = true; document.body.appendChild(bodyPanel); } els[id].remove(); delete els[id]; delete sizeCache[id]; delete sizedAt[id]; delete sizedText[id]; goneNow.delete(id); dirtyEl.delete(id); }
   }
-  if (modLive.size) { for (const n of all()) if (els[n.id]) modEmit('note', els[n.id], n); modEmit('render'); } // mods dress the notes before they are measured
+  if (modLive.size) { for (const n of all()) if (els[n.id] && !goneNow.has(n.id)) modEmit('note', els[n.id], n); modEmit('render'); } // mods dress the notes before they are measured
   if (window.findHook) window.findHook(); // keep search matches lit after a redraw
   applyScales(view().k, true);
   measure();
@@ -572,15 +628,89 @@ function render() {
 // tree notes get a width set by their level (in em of their own font, so a child is always
 // narrower than its parent); free notes keep their natural width
 const TREE_EM = d => (d === 0 ? 11 : 12);
+// Only the notes that can be seen are on the page. A note folded away, or far outside the window, has its element
+// taken out of the document (goneNow), so the browser has nothing to style, lay out or paint for it. It keeps its
+// last measured size (sizeUp scales it for another zoom) and is drawn afresh when it comes back (ungone).
+// cull() decides, from where each note sits; it runs with every redraw of the lines and every move of the view.
+const goneNow = new Set(); let goneTimer = 0;
+const dirtyEl = new Set();
+const pinnedNote = id => id === editingId || id === freshId || id === selectedId || (dragState && dragState.moving && dragState.moving.includes(id)) || (els[id] && els[id].contains(bodyPanel));
+function gone(id) { if (goneNow.has(id)) return; goneNow.add(id); const el = els[id]; if (el && el.parentNode) el.remove(); }
+function ungone(id) {
+  if (!goneNow.delete(id)) return;
+  const el = els[id], n = N(id); if (!el) return;
+  if (n) { renderNode(n, el); if (scaleNow[id] !== undefined) el.style.setProperty('--s', scaleNow[id].toFixed(4)); }
+  nodesLayer.appendChild(el);
+  if (n && modLive.size) modEmit('note', el, n);
+}
+// folded-away notes leave once they have faded
+function sweepGone() {
+  clearTimeout(goneTimer);
+  goneTimer = setTimeout(() => { for (const id in els) if (!goneNow.has(id) && !pinnedNote(id) && els[id].classList.contains('zhide')) gone(id); }, 260);
+}
+const CULL_PAD = 420; // how far outside the window a note is still kept on the page
+let cullBox = null, cullAt = null;
+function cull() {
+  const v = view(), k = v.k, pad = CULL_PAD / k;
+  const x0 = -v.x / k - pad, y0 = -v.y / k - pad, x1 = (innerWidth - v.x) / k + pad, y1 = (innerHeight - v.y) / k + pad;
+  cullBox = { x0, y0, x1, y1 }; cullAt = { x: v.x, y: v.y };
+  let swept = false;
+  for (const id in els) {
+    const n = N(id); if (!n) continue;
+    const isGone = goneNow.has(id);
+    if (pinnedNote(id)) { if (isGone) ungone(id); continue; }
+    if (pOf(n) < 1) { if (!isGone) swept = true; continue; } // folded: fades, then sweepGone takes it
+    const z = size(id), on = n.x < x1 && n.x + z.w > x0 && n.y < y1 && n.y + z.h > y0;
+    if (on) { if (isGone) ungone(id); } else if (!isGone) gone(id);
+  }
+  if (swept) sweepGone();
+}
+const sizedAt = {}; // id -> what its cached size was measured for
+const sizeKey = (n, inTree) => (scaleNow[n.id] || 1).toFixed(4) + '|' + (inTree ? 't' + depthOf(n) : 'f' + n.size);
+const sizedText = {}; // id -> the content its cached size was measured with
+const textKey = n => n.text + '\u0001' + ((n.images && n.images.length) || 0) + (n.body ? 'b' : '');
+// make sure these notes have an up-to-date size, whether or not they are on the page right now
+function sizeUp(ids) {
+  const need = [];
+  for (const id of ids) {
+    const n = N(id), el = els[id]; if (!n || !el) continue;
+    const inTree = isTree(n), key = sizeKey(n, inTree);
+    if (sizedAt[id] === key && sizedText[id] === textKey(n)) continue;
+    const old = sizeCache[id], was = sizedAt[id], sc = scaleNow[id] || 1;
+    // everything in a note is sized in em, so a known size at another zoom scales with the note's scale
+    if (old && was && sizedText[id] === textKey(n) && was.slice(was.indexOf('|')) === key.slice(key.indexOf('|')) && goneNow.has(id) && measuredScale[id]) {
+      const f = sc / measuredScale[id];
+      const z = { w: old.w * f, h: old.h * f };
+      if (!inTree) { n.x -= (z.w - old.w) / 2; n.y -= (z.h - old.h) / 2; } // a free note grows around its centre (as in measure)
+      sizeCache[id] = z; measuredScale[id] = sc; sizedAt[id] = key;
+      continue;
+    }
+    need.push([id, n, el, inTree, key]);
+  }
+  if (!need.length) return;
+  const back = [];
+  for (const [id, n, el, inTree] of need) { if (goneNow.has(id)) back.push(id); ungone(id); el.style.width = inTree ? TREE_EM(depthOf(n)) + 'em' : ''; }
+  for (const [id, n, el, inTree, key] of need) {
+    const z = { w: el.offsetWidth, h: el.offsetHeight }, old = sizeCache[id], sc = scaleNow[id] || 1;
+    if (old && !inTree && measuredScale[id] !== undefined && measuredScale[id] !== sc && id !== (dragState && dragState.id)) { n.x -= (z.w - old.w) / 2; n.y -= (z.h - old.h) / 2; el.style.left = n.x + 'px'; el.style.top = n.y + 'px'; }
+    sizeCache[id] = z; measuredScale[id] = sc; sizedAt[id] = key; sizedText[id] = textKey(n);
+  }
+  for (const id of back) gone(id); // straight back off the page
+}
 function measure() {
   const tree = new Set();
   for (const n of all()) if (n.parentId && N(n.parentId)) { tree.add(n.id); tree.add(n.parentId); }
+  const todo = [];
   for (const id in els) {
     const n = N(id);
+    if (goneNow.has(id)) continue; // off the page: sizeUp answers for it
+    if (n && !pinnedNote(id) && pOf(n) <= 0 && els[id].classList.contains('zhide')) continue; // folded away, fading
+    todo.push(id);
     els[id].style.width = n && tree.has(id) ? TREE_EM(depthOf(n)) + 'em' : '';
   }
-  for (const id in els) {
+  for (const id of todo) {
     const el = els[id], z = { w: el.offsetWidth, h: el.offsetHeight }, old = sizeCache[id], n = N(id), sc = scaleNow[id] || 1;
+    if (n) { sizedAt[id] = sizeKey(n, tree.has(id)); sizedText[id] = textKey(n); }
     // a free note that grew or shrank with the zoom does so around its centre, so notes lined up at one zoom stay lined up at every zoom
     if (n && old && !tree.has(id) && measuredScale[id] !== undefined && measuredScale[id] !== sc && id !== (dragState && dragState.id)) {
       n.x -= (z.w - old.w) / 2; n.y -= (z.h - old.h) / 2; el.style.left = n.x + 'px'; el.style.top = n.y + 'px';
@@ -612,8 +742,14 @@ function edgePath(p, c) {
 }
 
 let ghostEdge = null; // {from:id, x, y}
+let focusKidClick = null; // last click on a child of the note in focus
 function drawEdges() {
+  cull();
   fitSections();
+  const cb = cullBox, off = (a, b) => { const sa = size(a.id), sb = size(b.id); return Math.max(a.x + sa.w, b.x + sb.w) < cb.x0 || Math.min(a.x, b.x) > cb.x1 || Math.max(a.y + sa.h, b.y + sb.h) < cb.y0 || Math.min(a.y, b.y) > cb.y1; };
+  // a note in focus: everything but it and the notes under it steps back a little
+  const keep = selectedId && N(selectedId) && multi.size < 2 ? new Set([selectedId, ...descendants(selectedId)]) : null;
+  for (const k in els) if (!goneNow.has(k)) els[k].classList.toggle('dim', !!keep && !keep.has(k));
   let html = '';
   for (const n of all()) {
     if (!n.parentId || !N(n.parentId) || isHidden(n)) continue;
@@ -621,19 +757,19 @@ function drawEdges() {
     const c = colorOf(n);
     const hl = selectedId && (selectedId === n.id || selectedId === p.id);
     const pv = n.id === editingId || n.id === freshId ? 1 : pOf(n) >= 1 ? 1 : 0;
-    if (!pv) continue;
+    if (!pv || off(p, n)) continue; // not showing, or the whole line is outside the window
     const style = (c ? `stroke:${c};opacity:${(hl ? .95 : .55) * pv}` : `opacity:${pv}` + (hl ? ';stroke:var(--text-dim)' : ''));
-    html += `<path d="${edgePath(p, n)}" data-child="${n.id}" class="${hl ? 'hl' : ''}" style="${style}"/>`;
+    html += `<path d="${edgePath(p, n)}" data-child="${n.id}" class="${hl ? 'hl' : ''}${keep && !keep.has(n.id) ? ' dim' : ''}" style="${style}"/>`;
   }
   for (const L of doc.links) {
     if (L.kind !== 'flow') continue;
     const A = N(L.a), B = N(L.b);
-    if (!A || !B || isHidden(A) || isHidden(B)) continue;
+    if (!A || !B || isHidden(A) || isHidden(B) || (L.id !== selectedLink && off(A, B))) continue;
     const sel = L.id === selectedLink;
     const hl = sel || selectedId === L.a || selectedId === L.b;
     const d = flowPath(A, B);
     const m = sel ? 'url(#arr-sel)' : hl ? 'url(#arr-hl)' : 'url(#arr)';
-    html += `<path class="flow${sel ? ' sel' : hl ? ' hl' : ''}" data-flow="${L.id}" d="${d}" marker-end="${m}"${L.dir === 'both' ? ` marker-start="${m}"` : ''}/>`;
+    html += `<path class="flow${sel ? ' sel' : hl ? ' hl' : ''}${keep && !hl && !(keep.has(L.a) && keep.has(L.b)) ? ' dim' : ''}" data-flow="${L.id}" d="${d}" marker-end="${m}"${L.dir === 'both' ? ` marker-start="${m}"` : ''}/>`;
     html += `<path class="hit" data-link="${L.id}" d="${d}"/>`;
   }
   if (ghostEdge) {
@@ -667,6 +803,11 @@ let selectedLink = null;
 const linkById = id => (doc.links || []).find(L => L.id === id);
 const firstLine = t => (t || 'Untitled note').split('\n')[0].slice(0, 40);
 function jumpTargets(id) {
+  if (idx) { // one pass over the links for the whole job
+    const t = treeIndex();
+    if (!t.jumps) { t.jumps = new Map(); const put = (a, b) => { const l = t.jumps.get(a); if (l) l.push(b); else t.jumps.set(a, [b]); }; for (const L of doc.links || []) if (L.kind === 'jump') { if (N(L.b)) put(L.a, L.b); if (N(L.a)) put(L.b, L.a); } }
+    return t.jumps.get(id) || NONE;
+  }
   const out = [];
   for (const L of doc.links || []) {
     if (L.kind !== 'jump') continue;
@@ -730,6 +871,7 @@ function deleteLink(id) {
 let jumpHistory = [];
 function focusNote(id, fromId) {
   const n = N(id); if (!n) return;
+  clearFocus();
   if (editingId) commitEdit();
   const d = depthOf(n);
   const k = Math.min(MAX_K, Math.max(view().k, d >= 2 ? fullZoom(d) + 0.02 : 0, 0.55));
@@ -846,7 +988,8 @@ function select(id) {
   if (id && selectedSection) selectSection(null);
   if (selectedId === id) return;
   selectedId = id;
-  for (const k in els) els[k].classList.toggle('selected', k === id);
+  if (focusId && id !== focusId) clearFocus();
+  for (const k in els) if (!goneNow.has(k) || k === id) els[k].classList.toggle('selected', k === id);
   drawEdges();
   updateToolbar();
 }
@@ -1170,6 +1313,7 @@ function editAt(id, cx, cy) {
 }
 function startEditing(id, selectAll = true) {
   const el = els[id]; if (!el) return;
+  ungone(id);
   if (editingId && editingId !== id) commitEdit();
   select(id);
   editingId = id;
@@ -1195,7 +1339,7 @@ function finishEditing(save) {
       const text = t.innerText.replace(/ /g, ' ').replace(/\n+$/, '').trim();
       if (!text && freshId === id) {
         // empty brand new note: drop it quietly
-        delete doc.nodes[id];
+        delete doc.nodes[id]; touch();
         doc.links = doc.links.filter(L => N(L.a) && N(L.b));
         undoStack.pop();
         const parent = n.parentId;
@@ -1218,7 +1362,7 @@ const commitEdit = () => finishEditing(true);
 
 function createNode(props) {
   const id = uid();
-  const n = doc.nodes[id] = Object.assign({ id, parentId: null, x: 0, y: 0, text: '', size: 'md', color: 'none' }, props);
+  const n = doc.nodes[id] = Object.assign({ id, parentId: null, x: 0, y: 0, text: '', size: 'md', color: 'none' }, props); touch();
   const p = n.parentId && N(n.parentId);
   if (!p) { const sid = sectionAt(n.x + 60, n.y + 20); if (sid) n.section = sid; } // a child simply follows its parent
   return id;
@@ -1283,7 +1427,7 @@ function deleteNode(id) {
   if (editingId) finishEditing(false);
   checkpoint();
   const gone = [id, ...descendants(id)];
-  for (const g of gone) delete doc.nodes[g];
+  for (const g of gone) delete doc.nodes[g]; touch();
   doc.links = doc.links.filter(L => N(L.a) && N(L.b));
   selectedId = n.parentId && N(n.parentId) ? n.parentId : null;
   render(); relayout(); scheduleSave();
@@ -1310,6 +1454,7 @@ function insertNotes(pack, { keepParents = false, at = null } = {}) {
   for (const src of pack.nodes) {
     const n = JSON.parse(JSON.stringify(src));
     n.id = map[src.id]; n.x += dx; n.y += dy;
+    touch();
     if (inSet.has(src.parentId)) n.parentId = map[src.parentId];
     else if (!(keepParents && src.parentId && N(src.parentId))) {
       n.parentId = null; delete n.nudge;
@@ -1346,7 +1491,7 @@ function deleteMany(ids) {
   if (editingId) finishEditing(false);
   checkpoint();
   const gone = new Set(ids.flatMap(i => [i, ...descendants(i)]));
-  for (const g of gone) delete doc.nodes[g];
+  for (const g of gone) delete doc.nodes[g]; touch();
   doc.links = doc.links.filter(L => N(L.a) && N(L.b));
   selectedId = null; setMulti([]);
   render(); relayout(); scheduleSave();
@@ -1360,6 +1505,7 @@ function setColor(id, c) { const n = N(id); if (!n || (colorKey(n) || 'none') ==
 // zoom in on a note just enough to show its children, centred on its branch
 function zoomToBranch(id, instant) {
   const n = N(id); if (!n) return;
+  clearFocus();
   const ids = [id, ...descendants(id).filter(d => depthOf(N(d)) <= depthOf(n) + 1)];
   forcedDepth = Math.max(maxDepth(), depthOf(n) + 1);
   const pos = layoutTargets(); // where things will sit once revealed
@@ -1377,32 +1523,93 @@ function zoomToBranch(id, instant) {
   else animateView(target);
 }
 const toggleCollapse = zoomToBranch;
-// double-click: frame a note and its children, zooming in or out as needed
+// focus: the note in focus always ends up with the same title size on screen, whatever its level or its children
+const FOCUS_PX = 20;
+function focusZoom(id) {
+  const n = N(id), base = BASE_PX[classOf(n, childrenOf(id).length > 0)];
+  const px = k => (computeScales(k)[id] || 1) * base * k;
+  let lo = MIN_K, hi = MAX_K;
+  if (px(lo) >= FOCUS_PX) return lo;
+  if (px(hi) <= FOCUS_PX) return hi;
+  for (let i = 0; i < 40 && hi / lo > 1.0005; i++) { const m = Math.sqrt(lo * hi); if (px(m) < FOCUS_PX) lo = m; else hi = m; }
+  return hi;
+}
 function focusBranch(id) {
   const n = N(id); if (!n) return;
-  const d0 = depthOf(n), kids = childrenOf(id);
-  const ids = [id, ...kids.map(c => c.id)];
-  const need = kids.length ? (d0 + 1 >= 2 ? fullZoom(d0 + 1) + 0.02 : 0) : (d0 >= 2 ? fullZoom(d0) + 0.02 : 0);
-  let k = view().k, box = null;
-  for (let i = 0; i < 6; i++) { // lay out as it will look at zoom k, fit, repeat until the zoom settles
-    const kNow = view().k; view().k = k;
-    applyScales(k); measure();
-    const pos = layoutTargets();
-    view().k = kNow;
-    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-    for (const c of ids) {
-      const m = pos ? pos[c] || N(c) : N(c), s = size(c);
-      x0 = Math.min(x0, m.x); y0 = Math.min(y0, m.y); x1 = Math.max(x1, m.x + s.w); y1 = Math.max(y1, m.y + s.h);
-    }
-    box = { x0, y0, x1, y1 };
-    const fit = Math.min((innerWidth - 160) / Math.max(1, x1 - x0), (innerHeight - 220) / Math.max(1, y1 - y0));
-    const kNew = Math.min(MAX_K, 1.4, Math.max(MIN_K, need, fit));
-    if (Math.abs(kNew / k - 1) < 0.01) break;
-    k = i < 3 ? kNew : Math.sqrt(k * kNew); // damp if it oscillates
-  }
-  applyScales(view().k, true); measure();
-  animateView({ k, x: innerWidth / 2 - ((box.x0 + box.x1) / 2) * k, y: 22 + innerHeight / 2 - ((box.y0 + box.y1) / 2) * k }, 420);
+  if (focusId !== id) { focusOpen.clear(); focusId = id; focusScroll = focusScrollGoal = 0; }
+  for (const c of [...focusOpen]) if (!N(c) || N(c).parentId !== id) focusOpen.delete(c);
   select(id);
+  lastDepth = -1; render(); // the folds follow the focus
+  const kids = childrenOf(id);
+  const ids = [id, ...kids.map(c => c.id), ...kids.filter(c => focusOpen.has(c.id)).flatMap(c => childrenOf(c.id).map(g => g.id))];
+  const k = Math.min(MAX_K, focusZoom(id) * (focusOpen.size ? FOCUS_STEP : 1)); // one step closer while a child is open
+  const kNow = view().k; view().k = k;
+  applyScales(k); measure();
+  const pos = layoutTargets(); // as it will sit at that zoom
+  view().k = kNow;
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const c of ids) {
+    const m = pos ? pos[c] || N(c) : N(c), s = size(c);
+    x0 = Math.min(x0, m.x); y0 = Math.min(y0, m.y); x1 = Math.max(x1, m.x + s.w); y1 = Math.max(y1, m.y + s.h);
+  }
+  const me = pos ? pos[id] || n : n, ms = size(id);
+  applyScales(view().k, true); measure();
+  if (focusScroll) { // scrolled: the note stays exactly where it is on screen
+    const c0 = centerOnScreen(id);
+    if (Math.abs(k / view().k - 1) < 0.002) relayout();
+    animateView({ k, x: c0.x - (me.x + ms.w / 2) * k, y: c0.y - (me.y + ms.h / 2) * k }, 420);
+    return;
+  }
+  // centre the note with what it shows; when that does not all fit, the note itself stays in view
+  let x = innerWidth / 2 - ((x0 + x1) / 2) * k, y = 22 + innerHeight / 2 - ((y0 + y1) / 2) * k;
+  const mx = 90, top = 110, bot = 150;
+  x = Math.min(Math.max(x, mx - me.x * k), Math.max(mx - me.x * k, innerWidth - mx - (me.x + ms.w) * k));
+  y = Math.min(Math.max(y, top - me.y * k), Math.max(top - me.y * k, innerHeight - bot - (me.y + ms.h) * k));
+  if (Math.abs(k / view().k - 1) < 0.002) relayout(); // same zoom: only the folds moved
+  animateView({ k, x, y }, 420);
+}
+// wheel at the right edge: scroll what hangs under the note in focus, which itself does not move
+function focusScrollBy(delta) {
+  const k = view().k; let top = Infinity, bottom = -Infinity;
+  for (const c of descendants(focusId)) { const n = N(c); if (isHidden(n)) continue; const y = n.y * k + view().y - focusScroll; top = Math.min(top, y); bottom = Math.max(bottom, y + size(c).h * k); }
+  if (top === Infinity) return;
+  const lo = Math.min(0, innerHeight - 60 - bottom), hi = Math.max(0, 80 - top); // far enough to bring either end into view
+  focusScrollGoal = Math.min(hi, Math.max(lo, focusScrollGoal + delta));
+  if (focusScrollRaf) return;
+  const step = () => {
+    focusScrollRaf = 0;
+    if (!focusId) return;
+    const d = focusScrollGoal - focusScroll;
+    focusScroll = Math.abs(d) < 1 ? focusScrollGoal : focusScroll + d * 0.3;
+    cancelAnimationFrame(layoutAnim);
+    const pos = layoutTargets();
+    for (const id in pos) { const n = N(id); if (!n) continue; putAt(n, pos[id]); if (!goneNow.has(id) && els[id]) { els[id].style.left = n.x + 'px'; els[id].style.top = n.y + 'px'; } }
+    drawEdges(); positionToolbar();
+    if (focusScroll !== focusScrollGoal) focusScrollRaf = requestAnimationFrame(step);
+  };
+  focusScrollRaf = requestAnimationFrame(step);
+}
+// wheel at the left edge: the focus steps to the sibling above or below
+let focusStepAt = 0;
+function focusSiblings() {
+  const n = N(focusId); if (!n) return [];
+  const sibs = n.parentId && N(n.parentId) ? childrenOf(n.parentId) : roots().sort((a, b) => a.y - b.y || a.x - b.x);
+  return sibs.filter(s => !isHidden(s) || s.id === focusId);
+}
+function focusStep(dir) {
+  if (performance.now() - focusStepAt < 320) return; // one sibling per turn of the wheel
+  const sibs = focusSiblings(), i = sibs.findIndex(s => s.id === focusId), next = sibs[i + dir];
+  if (!next) return;
+  focusStepAt = performance.now();
+  focusBranch(next.id);
+}
+const EDGE_ZONE = 0.12;
+// click a child of the note in focus: its own children unfold or fold back, the focus stays where it is
+const FOCUS_STEP = 1.25;
+function toggleFocusKid(cid) {
+  if (!focusId || !N(cid) || N(cid).parentId !== focusId) return;
+  if (focusOpen.has(cid)) focusOpen.delete(cid); else focusOpen.add(cid);
+  focusBranch(focusId);
 }
 function applyLayoutNow(id) {
   const pos = layoutTargets(id); delete pos[id];
@@ -1418,7 +1625,7 @@ function unfoldLayout(id) {
 function reparent(id, newParent) {
   const n = N(id);
   if (!n || id === newParent || (newParent && isAncestor(id, newParent))) return false;
-  n.parentId = newParent || null;
+  n.parentId = newParent || null; touch();
   if (newParent) { const sib = all().find(o => o.parentId === newParent && o.id !== id); if (sib) n.size = sib.size; }
   return true;
 }
@@ -1448,21 +1655,23 @@ function layoutTargets(onlyId) {
   const kidsMap = {};
   for (const n of all()) if (n.parentId && N(n.parentId)) (kidsMap[n.parentId] = kidsMap[n.parentId] || []).push(n);
   const orderY = n => n.y - (lastNudgeY[n.id] || 0); // sibling order ignores hand nudges
-  for (const id in kidsMap) kidsMap[id].sort((a, b) => orderY(a) - orderY(b) || a.x - b.x);
-  const kidsOf = id => kidsMap[id] || [];
+  const sorted = new Set(); // each family is put in order the first time the layout asks for it
+  const kidsOf = id => { const l = kidsMap[id]; if (!l) return NONE; if (!sorted.has(id)) { sorted.add(id); l.sort((a, b) => orderY(a) - orderY(b) || a.x - b.x); } return l; };
   const depth = {};
   const dOf = id => (depth[id] !== undefined ? depth[id] : (depth[id] = depthOf(N(id))));
-  const pk = id => levelP(dOf(id) + 1); // how unfolded this note's children are
+  const pk = id => kidsP(N(id)); // how unfolded this note's children are
   const visKids = id => (pk(id) > 0 ? kidsOf(id) : []);
   // spacing grows with the notes when zoomed out
-  const kidScale = id => Math.max(1, ...kidsOf(id).map(c => scaleNow[c.id] || 1));
+  const ksMemo = new Map();
+  const kidScale = id => { let v = ksMemo.get(id); if (v === undefined) { v = 1; for (const c of kidsMap[id] || NONE) { const sc = scaleNow[c.id] || 1; if (sc > v) v = sc; } ksMemo.set(id, v); } return v; };
   const gx = id => GAP_X * Math.max(scaleNow[id] || 1, kidScale(id));
   const gy = id => GAP_Y * kidScale(id);
   // siblings whose own children are showing get extra room, so each family reads as a group
   const GROUP = 2.2;
   const famP = id => (visKids(id).length ? pk(id) : 0);
   const secM = Math.max(1, 1 / doc.view.k);
-  const secOf = n => effSec(n);
+  const secMemo = new Map();
+  const secOf = n => { let v = secMemo.get(n.id); if (v === undefined) { v = effSec(n); secMemo.set(n.id, v); } return v; };
   const gapAfter = (pid, kids, i) => {
     const g = gy(pid) * (1 + GROUP * Math.max(famP(kids[i].id), famP(kids[i + 1].id)));
     const a = secOf(kids[i]), b = secOf(kids[i + 1]);
@@ -1471,9 +1680,10 @@ function layoutTargets(onlyId) {
     return Math.max(g, ((a ? SEC_PAD : 0) + (b ? SEC_TOP : 0) + 14) * secM);
   };
   const gapsSum = (pid, kids) => { let g = 0; for (let i = 0; i < kids.length - 1; i++) g += gapAfter(pid, kids, i); return g; };
-  const tuck = (id, at) => { for (const c of kidsOf(id)) { pos[c.id] = { ...at }; tuck(c.id, at); } };
+  const tuck = (id, at) => { for (const c of kidsMap[id] || NONE) { pos[c.id] = { x: at.x, y: at.y }; tuck(c.id, at); } };
   // a section dragged away from its tree's layout carries an offset (ox, oy); its notes are placed shifted by it
-  const off = id => { let x = 0, y = 0, sec = N(id) && effSec(N(id)) && SEC(effSec(N(id))), g = 0; while (sec && g++ < 20) { x += sec.ox || 0; y += sec.oy || 0; sec = sec.parent && SEC(sec.parent); } return { x, y }; };
+  const noOff = { x: 0, y: 0 }, anySec = allSections().length > 0;
+  const off = id => { if (!anySec) return noOff; let x = 0, y = 0, sid = N(id) && secOf(N(id)), sec = sid && SEC(sid), g = 0; while (sec && g++ < 20) { x += sec.ox || 0; y += sec.oy || 0; sec = sec.parent && SEC(sec.parent); } return { x, y }; };
   const relOff = id => { const n = N(id), a = off(id); if (!n.parentId || !N(n.parentId)) return a; const b = off(n.parentId); return { x: a.x - b.x, y: a.y - b.y }; };
   // a subtree pulled away by its section no longer takes room among its siblings
   const detached = id => { const r = relOff(id); return r.x !== 0 || r.y !== 0; };
@@ -1544,6 +1754,11 @@ function layoutTargets(onlyId) {
   };
   const unionBox = (a, b) => ({ x0: Math.min(a.x0, b.x0), x1: Math.max(a.x1, b.x1), y0: Math.min(a.y0, b.y0), y1: Math.max(a.y1, b.y1) });
   const shiftSub = (id, dy) => { pos[id].y += dy; for (const k of kidsOf(id)) if (pos[k.id]) shiftSub(k.id, dy); };
+  { // every note this layout gives room to needs a true size, also one that is off the page right now
+    const need = [], walk = id => { need.push(id); for (const k of visKids(id)) walk(k.id); };
+    if (onlyId) walk(onlyId); else for (const r of roots()) walk(r.id);
+    sizeUp(need);
+  }
   if (onlyId) {
     measureSub(onlyId);
     const oo = relOff(onlyId);
@@ -1584,6 +1799,11 @@ function layoutTargets(onlyId) {
       if (c < cost && clear(y)) { best = y; cost = c; }
     }
     if (best !== null) { p.y = best; obst.push(rect(r.id)); }
+  }
+  // the note in focus: what hangs under it can be scrolled past it (a passing shift, the note itself stays)
+  if (focusScroll && focusId && N(focusId) && forcedDepth === null) {
+    const dy = focusScroll / doc.view.k;
+    for (const c of descendants(focusId)) if (pos[c]) { pos[c].y += dy; if (pos[c].home !== undefined) pos[c].home += dy; }
   }
   return pos;
 }
@@ -1654,7 +1874,7 @@ function animateLayout(target, anchor, ms = 380, pre = null) {
     for (const id in target) {
       const n = N(id); if (!n) continue;
       putAt(n, target[id], Math.round(from[id].x + (target[id].x - from[id].x) * e), Math.round(from[id].y + (target[id].y - from[id].y) * e));
-      if (els[id]) { els[id].style.left = n.x + 'px'; els[id].style.top = n.y + 'px'; }
+      if (!goneNow.has(id) && els[id]) { els[id].style.left = n.x + 'px'; els[id].style.top = n.y + 'px'; }
     }
     if (A) { // keep the note under the cursor still while the tree reshapes
       const after = centerOnScreen(anchor);
@@ -1773,7 +1993,7 @@ function deleteSection(id) {
   const secs = [id, ...allSections().filter(o => secInside(o.id, id)).map(o => o.id)], fam = new Set(secs);
   const gone = new Set();
   for (const n of all()) if (fam.has(effSec(n))) { gone.add(n.id); for (const d of descendants(n.id)) gone.add(d); }
-  for (const g of gone) delete doc.nodes[g];
+  for (const g of gone) delete doc.nodes[g]; touch();
   doc.links = doc.links.filter(L => N(L.a) && N(L.b));
   for (const s2 of secs) delete doc.sections[s2];
   for (const o of allSections()) if (o.parent && !SEC(o.parent)) o.parent = sec.parent || null;
@@ -2044,10 +2264,12 @@ viewport.addEventListener('pointerdown', e => {
   e.preventDefault();
   const wasSelected = selectedId === id && !pendingFocus;
   const group = multi.size > 1 && multi.has(id); // dragging one of several selected notes moves them all
-  select(id);
+  // a child of the note in focus: a click folds/unfolds it and the focus stays on its parent
+  const focusKid = !group && !e.altKey && e.button === 0 && focusId && selectedId === focusId && N(id).parentId === focusId && childrenOf(id).length > 0;
+  if (!focusKid) select(id);
   const moving = group ? [...new Set([...multi].flatMap(m => [m, ...descendants(m)]))] : [id, ...descendants(id)];
   dragState = {
-    type: 'move', id, sx: e.clientX, sy: e.clientY, moved: false, drop: null, wasSelected, group, dup: e.altKey,
+    type: 'move', id, sx: e.clientX, sy: e.clientY, moved: false, drop: null, wasSelected, group, focusKid, dup: e.altKey,
     moving, exclude: new Set(moving),
     start: Object.fromEntries(moving.map(m => [m, { x: N(m).x, y: N(m).y }])),
   };
@@ -2239,6 +2461,13 @@ function endDrag(e) {
       if (autoOn()) alignWho = new Set(d.moving);
       render(); relayout(); scheduleSave();
     } else if (e && e.type === 'pointerup' && !e.altKey && N(d.id) && els[d.id]) {
+      if (d.focusKid) { // one click folds/unfolds; a double-click moves the focus into that child instead
+        const id = d.id, again = focusKidClick && focusKidClick.id === id;
+        if (focusKidClick) { clearTimeout(focusKidClick.t); focusKidClick = null; }
+        if (again) focusBranch(id);
+        else focusKidClick = { id, t: setTimeout(() => { focusKidClick = null; toggleFocusKid(id); }, 260) }; // wait: it may be a double-click
+        updateToolbar(); return;
+      }
       // click a note: select it and bring its branch into view; click it again (or double-click) to write
       if (d.wasSelected || pendingFocus) { clearTimeout(pendingFocus); pendingFocus = 0; editAt(d.id, e.clientX, e.clientY); return; }
       const id = d.id;
@@ -2280,6 +2509,11 @@ viewport.addEventListener('dblclick', e => {
 
 viewport.addEventListener('wheel', e => {
   e.preventDefault();
+  if (!e.ctrlKey && focusId && N(focusId) && selectedId === focusId && e.deltaY) { // the screen edges give the wheel another job while a note is in focus (checked first: these turns must not stop the camera on its way to the note)
+    const dy = e.deltaY * (e.deltaMode === 1 ? 30 : 1);
+    if (e.clientX >= innerWidth * (1 - EDGE_ZONE)) { if (descendants(focusId).length) { focusScrollBy(-dy); return; } }
+    else if (e.clientX <= innerWidth * EDGE_ZONE && focusSiblings().length > 1) { focusStep(dy > 0 ? 1 : -1); return; }
+  }
   cancelAnimationFrame(viewAnim); viewAnimating = false;
   lastPointer = { x: e.clientX, y: e.clientY };
   const trackpadPan = !e.ctrlKey && (Math.abs(e.deltaX) > 0 || (e.deltaMode === 0 && Math.abs(e.deltaY) < 40 && !Number.isInteger(e.deltaY)));
@@ -2795,7 +3029,7 @@ function resetCanvas() {
   undoStack.length = 0; redoStack.length = 0;
   selectedId = null; editingId = null; freshId = null; selectedLink = null; jumpHistory = [];
   linkBar.hidden = true; jumpMenu.hidden = true; relMenu.hidden = true;
-  lastK = null; lastDepth = null; gestureAnchor = null;
+  lastK = null; lastDepth = null; gestureAnchor = null; focusId = null; focusOpen.clear(); focusScroll = focusScrollGoal = 0;
   migrated = false; wasFolded.length = 0;
   toolbar.hidden = true; $('#toast').hidden = true;
 }
@@ -3671,6 +3905,41 @@ async function sendAi() {
   if (r.queued) { task.wait(r.ok); aiWaiting[r.queued] = task; return; }
   task.done(r.error || r.ok || 'Done', !!r.error);
 }
+
+/* the big jobs look the tree up through one index each (see treeIndex) */
+render = indexed(render);
+applyView = indexed(applyView);
+onZoomChange = indexed(onZoomChange);
+layoutTargets = indexed(layoutTargets);
+drawEdges = indexed(drawEdges);
+measure = indexed(measure);
+paintLevels = indexed(paintLevels);
+paintText = indexed(paintText);
+focusBranch = indexed(focusBranch);
+fitAll = indexed(fitAll);
+select = indexed(select);
+relayout = indexed(relayout);
+renderSections = indexed(renderSections);
+boundsAtDepth = indexed(boundsAtDepth);
+zoomToBranch = indexed(zoomToBranch);
+focusNote = indexed(focusNote);
+updateToolbar = indexed(updateToolbar);
+fitSections = indexed(fitSections);
+anchorNote = indexed(anchorNote);
+paintRootMarkers = indexed(paintRootMarkers);
+serialize = indexed(serialize);
+snapshot = indexed(snapshot);
+tidy = indexed(tidy);
+toggleFocusKid = indexed(toggleFocusKid);
+focusStep = indexed(focusStep);
+clearFocus = indexed(clearFocus);
+focusScrollBy = indexed(focusScrollBy);
+focusSiblings = indexed(focusSiblings);
+restore = indexed(restore);
+deleteNode = indexed(deleteNode);
+deleteMany = indexed(deleteMany);
+insertNotes = indexed(insertNotes);
+applyScales = indexed(applyScales);
 
 /* ---------------- boot ---------------- */
 
