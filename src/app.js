@@ -178,14 +178,42 @@ let lastPointer = null; // where the cursor is, so zooming keeps that spot stead
 let focusId = null; const focusOpen = new Set();
 let focusScroll = 0, focusScrollGoal = 0, focusScrollRaf = 0; // screen px the focused note's children are scrolled by
 // how unfolded the children of n are (0..1)
+/* ---- pinned notes (middle click): n.pin = { x, y, s } is the place and the size the note keeps on the board.
+   It no longer grows when zooming out, so far out it turns into a filled box (state 1) and then leaves (state 0).
+   While it shows, the notes above it show too, and the tree is laid out around it (layoutTargets). ---- */
+const PIN_GONE_PX = 3.4;
+let anyPin = false;
+const pinPx = n => n.pin.s * BASE_PX[classOf(n, hasKids(n.id))] * doc.view.k;
+const pinState = n => { const px = pinPx(n); return px < PIN_GONE_PX ? 0 : px < READ_PX * 0.9 ? 1 : 2; };
+const NOPINS = { any: false, path: new Set(), off: new Set() };
+function pinInfo() {
+  if (!anyPin) return NOPINS;
+  const t = idx ? treeIndex() : null, k = doc.view.k;
+  if (t && t.pins && t.pinsK === k) return t.pins;
+  const path = new Set(), off = new Set(), on = [];
+  for (const n of all()) if (n.pin) { if (pinState(n)) on.push(n); else off.add(n.id); }
+  for (const n of on) {
+    const up = []; let p = n, g = 0, dead = false;
+    while (p && g++ < 99) { if (off.has(p.id)) { dead = true; break; } up.push(p.id); p = p.parentId && N(p.parentId); }
+    if (!dead) for (const id of up) path.add(id);
+  }
+  const r = { any: true, path, off };
+  if (t) { t.pins = r; t.pinsK = k; }
+  return r;
+}
+const underOff = (n, pi) => { let p = n, g = 0; while (p && g++ < 99) { if (pi.off.has(p.id)) return true; p = p.parentId && N(p.parentId); } return false; };
 function kidsP(n) {
+  if (n.pin) { const st = pinState(n); if (st === 0) return 0; if (st === 2) return 1; } // a pinned note keeps its children out, like a note in focus
   const d = depthOf(n) + 1;
   if (forcedDepth !== null || !focusId || !N(focusId)) return levelP(d);
   const fd = depthOf(N(focusId));
   if (d <= fd + 1) return levelP(d);
   return d === fd + 2 && focusOpen.has(n.id) ? 1 : 0;
 }
-const pOf = n => (n.parentId && N(n.parentId) ? kidsP(N(n.parentId)) : levelP(0));
+const pOf = n => {
+  if (anyPin) { const pi = pinInfo(); if (pi.off.size && underOff(n, pi)) return 0; if (pi.path.has(n.id)) return 1; }
+  return n.parentId && N(n.parentId) ? kidsP(N(n.parentId)) : levelP(0);
+};
 const isHidden = n => pOf(n) < 1; // levels only show once fully unfolded
 const kidsHidden = n => kidsP(n) <= 0;
 function clearFocus() {
@@ -198,7 +226,18 @@ function isAncestor(a, b) { // is a an ancestor of b?
   while (p) { if (p === a) return true; p = N(p) && N(p).parentId; }
   return false;
 }
-const size = id => sizeCache[id] || { w: 160, h: 40 };
+// The selected note's description opens in a frame that grows out of the note, to the right and down. The layout leaves
+// that much room (room) after the note: what sits below it moves down and its children move right, nothing else moves.
+let room = null, roomRaf = 0;
+const NOSIZE = { w: 160, h: 40 };
+const size = id => sizeCache[id] || NOSIZE;
+function setRoom(id, w, h) {
+  if (room ? room.id === id && Math.abs(room.w - w) < 0.5 && Math.abs(room.h - h) < 0.5 : !id) return;
+  room = id ? { id, w, h } : null;
+  cancelAnimationFrame(roomRaf);
+  roomRaf = requestAnimationFrame(() => { if (!dragState && !viewAnimating) relayout(); else drawEdges(); });
+}
+const shellSteady = () => bodyShell && bodyShell.isConnected && !bodyShell.classList.contains('opening') && !bodyShell.classList.contains('closing');
 
 /* ---------------- persistence ---------------- */
 
@@ -226,6 +265,7 @@ function load(id) {
   for (const n of all()) {
     n.size = SIZES.includes(n.size) ? n.size : 'md';
     n.text = n.text || '';
+    if (n.pin && !(typeof n.pin === 'object' && [n.pin.x, n.pin.y, n.pin.s].every(Number.isFinite) && n.pin.s > 0)) delete n.pin;
     if ('collapsed' in n) { if (n.collapsed) wasFolded.push(n.id); delete n.collapsed; migrated = true; } // folding is now driven by zoom
   }
   doc.links = Array.isArray(doc.links) ? doc.links.filter(L => N(L.a) && N(L.b) && L.a !== L.b) : [];
@@ -282,8 +322,10 @@ function restore(from, to) {
   to.push(snapshot());
   if (editingSection) finishSectionLabel(false);
   const snap = JSON.parse(from.pop());
+  const hadPin = {}; for (const n of all()) hadPin[n.id] = !!n.pin;
   if (snap && snap.n) { doc.nodes = snap.n; doc.links = snap.l || []; doc.sections = snap.s || {}; } else doc.nodes = snap;
   touch();
+  for (const n of all()) if (hadPin[n.id] !== undefined && hadPin[n.id] !== !!n.pin) delete measuredScale[n.id]; // pinned or unpinned by this step: its size changes without a shift
   if (selectedId && !N(selectedId)) selectedId = null;
   if (selectedLink && !linkById(selectedLink)) selectedLink = null;
   if (selectedSection && !SEC(selectedSection)) selectedSection = null;
@@ -364,7 +406,8 @@ function computeScales(k) {
     const cls = inTree ? treeClass(d) : n.size;
     let font = (inTree ? TREE_PX(d) : BASE_PX[cls]) * grow(cls);
     if (parentFont) font = Math.max(Math.min(font, parentFont * CHILD_RATIO), Math.min(MIN_FONT, parentFont * CHILD_RATIO));
-    out[n.id] = font / BASE_PX[cls];
+    if (n.pin) font = n.pin.s * BASE_PX[cls]; // pinned: the size it had when it was pinned
+    out[n.id] = n.pin ? n.pin.s : font / BASE_PX[cls];
     if (d < 60) for (const c of kids[n.id] || []) visit(c, font, d + 1);
   };
   for (const r of kids['_'] || []) visit(r, 0, 0);
@@ -409,8 +452,10 @@ let gestureAnchor = null, gestureTimer = null;
 function onZoomChange() {
   const k = view().k;
   const md = maxDepthAt(k) * 2 + (levelP(maxDepthAt(k), k) >= 1 ? 1 : 0); // also re-render when a level finishes unfolding (badges)
-  if (md !== lastDepth) {
-    lastDepth = md;
+  let sig = md;
+  if (anyPin) { sig = md + ''; for (const n of all()) if (n.pin) sig += pinState(n); } // a pinned note turning into a box, or leaving
+  if (sig !== lastDepth) {
+    lastDepth = sig;
     if (editingId && editingId !== freshId && isHidden(N(editingId))) commitEdit();
     render(); // badges + visibility
   }
@@ -575,6 +620,19 @@ function renderNode(n, el) {
     fold.title = `${count} more note${count > 1 ? 's' : ''}. Zoom in, or click to zoom into this branch`;
   } else if (fold) fold.remove();
   paintThumbs(el, n.images, 'note');
+  el.classList.toggle('pinned', !!n.pin);
+  let ph = el.querySelector(':scope > .pin-head'), pb = el.querySelector(':scope > .pin-body');
+  if (n.pin && !ph) { ph = document.createElement('div'); ph.className = 'pin-head'; el.appendChild(ph); } else if (!n.pin && ph) ph.remove();
+  const pinText = n.pin && n.body && n.body.trim() ? n.body : '', pinImgs = (n.pin && n.bodyImages) || [];
+  if (pinText || pinImgs.length) { // pinned: the description stays open, as part of the note
+    if (!pb) { pb = document.createElement('div'); pb.className = 'pin-body'; pb.innerHTML = '<div class="pb-imgs"></div><div class="pb-text"></div>'; el.insertBefore(pb, el.querySelector(':scope > .handle')); }
+    if (pb.lastChild.textContent !== pinText) pb.lastChild.textContent = pinText;
+    const key = pinImgs.join('|');
+    if (pb.firstChild.dataset.k !== key) {
+      pb.firstChild.dataset.k = key; pb.firstChild.textContent = '';
+      for (const name of pinImgs) { const img = document.createElement('img'); img.draggable = false; img.alt = ''; img.onload = img.onerror = () => { cancelAnimationFrame(thumbRelayout); thumbRelayout = requestAnimationFrame(() => { measure(); relayout(); positionToolbar(); }); }; img.src = imgSrc(name); pb.firstChild.appendChild(img); }
+    }
+  } else if (pb) pb.remove();
   el.classList.toggle('has-url', !!n.url);
   el.classList.toggle('has-imgs', !!(n.images && n.images.length));
   let bm = el.querySelector('.body-mark');
@@ -595,6 +653,7 @@ function renderNode(n, el) {
   } else if (jb) jb.remove();
 }
 function render() {
+  anyPin = false; for (const id in doc.nodes) if (doc.nodes[id].pin) { anyPin = true; break; }
   const live = new Set();
   for (const n of all()) {
     live.add(n.id);
@@ -668,13 +727,17 @@ function cull() {
 const sizedAt = {}; // id -> what its cached size was measured for
 const sizeKey = (n, inTree) => (scaleNow[n.id] || 1).toFixed(4) + '|' + (inTree ? 't' + depthOf(n) : 'f' + n.size);
 const sizedText = {}; // id -> the content its cached size was measured with
-const textKey = n => n.text + '\u0001' + ((n.images && n.images.length) || 0) + (n.body ? 'b' : '');
+const textKey = n => n.text + '\u0001' + ((n.images && n.images.length) || 0) + (n.body ? 'b' : '') + (n.pin ? '\u0001' + (n.body || '') + '\u0001' + ((n.bodyImages && n.bodyImages.length) || 0) : '');
+// a tree note's width comes from its level; pinned with its description open it is wider
+const PIN_EM = 17;
+const treeWidth = n => (n.pin && ((n.body && n.body.trim()) || (n.bodyImages && n.bodyImages.length)) ? PIN_EM : TREE_EM(depthOf(n))) + 'em';
 // make sure these notes have an up-to-date size, whether or not they are on the page right now
 function sizeUp(ids) {
   const need = [];
   for (const id of ids) {
     const n = N(id), el = els[id]; if (!n || !el) continue;
     const inTree = isTree(n), key = sizeKey(n, inTree);
+    if (unrolling.has(id)) continue; // its description is still opening: the size taken before that stands
     if (sizedAt[id] === key && sizedText[id] === textKey(n)) continue;
     const old = sizeCache[id], was = sizedAt[id], sc = scaleNow[id] || 1;
     // everything in a note is sized in em, so a known size at another zoom scales with the note's scale
@@ -689,7 +752,7 @@ function sizeUp(ids) {
   }
   if (!need.length) return;
   const back = [];
-  for (const [id, n, el, inTree] of need) { if (goneNow.has(id)) back.push(id); ungone(id); el.style.width = inTree ? TREE_EM(depthOf(n)) + 'em' : ''; }
+  for (const [id, n, el, inTree] of need) { if (goneNow.has(id)) back.push(id); ungone(id); el.style.width = inTree ? treeWidth(n) : ''; }
   for (const [id, n, el, inTree, key] of need) {
     const z = { w: el.offsetWidth, h: el.offsetHeight }, old = sizeCache[id], sc = scaleNow[id] || 1;
     if (old && !inTree && measuredScale[id] !== undefined && measuredScale[id] !== sc && id !== (dragState && dragState.id)) { n.x -= (z.w - old.w) / 2; n.y -= (z.h - old.h) / 2; el.style.left = n.x + 'px'; el.style.top = n.y + 'px'; }
@@ -703,10 +766,10 @@ function measure() {
   const todo = [];
   for (const id in els) {
     const n = N(id);
-    if (goneNow.has(id)) continue; // off the page: sizeUp answers for it
+    if (goneNow.has(id) || unrolling.has(id)) continue; // off the page: sizeUp answers for it
     if (n && !pinnedNote(id) && pOf(n) <= 0 && els[id].classList.contains('zhide')) continue; // folded away, fading
     todo.push(id);
-    els[id].style.width = n && tree.has(id) ? TREE_EM(depthOf(n)) + 'em' : '';
+    els[id].style.width = n && tree.has(id) ? treeWidth(n) : '';
   }
   for (const id of todo) {
     const el = els[id], z = { w: el.offsetWidth, h: el.offsetHeight }, old = sizeCache[id], n = N(id), sc = scaleNow[id] || 1;
@@ -720,7 +783,7 @@ function measure() {
 }
 // In files and undo steps a free note's x,y is its top-left corner at 100% zoom; on screen it is kept centred on the same spot.
 const measuredScale = {};
-const freeOff = n => { const sc = scaleNow[n.id] || 1, z = sizeCache[n.id]; return !z || sc === 1 || isTree(n) ? null : { x: (z.w - z.w / sc) / 2, y: (z.h - z.h / sc) / 2 }; };
+const freeOff = n => { const sc = scaleNow[n.id] || 1, z = sizeCache[n.id]; return !z || sc === 1 || n.pin || isTree(n) ? null : { x: (z.w - z.w / sc) / 2, y: (z.h - z.h / sc) / 2 }; };
 function canonNodes() {
   const out = {}, r = v => Math.round(v * 100) / 100;
   for (const n of all()) { const o = freeOff(n); out[n.id] = o ? { ...n, x: r(n.x + o.x), y: r(n.y + o.y) } : n; }
@@ -1100,7 +1163,8 @@ function showBody(n) {
 let bodyShell = null;
 function shellMetrics(el, shell) {
   const cs = getComputedStyle(el);
-  shell.style.setProperty('--nh', el.offsetHeight + 'px'); shell.style.setProperty('--nw', el.offsetWidth + 'px');
+  const pb = el.querySelector(':scope > .pin-body'); // a pinned note: the frame takes the place of the description shown in it
+  shell.style.setProperty('--nh', el.offsetHeight - (pb ? pb.offsetHeight : 0) + 'px'); shell.style.setProperty('--nw', el.offsetWidth + 'px');
   shell.style.setProperty('--pl', cs.paddingLeft); shell.style.setProperty('--bw', cs.borderTopWidth);
 }
 // the + handle rides on the frame's right edge
@@ -1117,7 +1181,7 @@ function closeShell(shell, el) {
 }
 function openBody(id) {
   const el = els[id]; if (!el) return;
-  if (bodyShell && bodyShell.parentNode === el && bodyShell.contains(bodyPanel)) { bodyPanel.hidden = false; shellMetrics(el, bodyShell); return; }
+  if (bodyShell && bodyShell.parentNode === el && bodyShell.contains(bodyPanel)) { bodyPanel.hidden = false; shellMetrics(el, bodyShell); if (shellSteady()) setRoom(id, bodyShell.offsetWidth, bodyShell.offsetHeight); return; }
   const old = bodyShell, oldEl = old && old.parentNode;
   for (const g of el.querySelectorAll(':scope > .nb-shell')) if (g !== old) g.remove(); // a frame still closing on this note
   bodyPanel.style.width = '';
@@ -1127,6 +1191,7 @@ function openBody(id) {
   if (old) { if (oldEl === el) old.remove(); else closeShell(old, oldEl); }
   const w = shell.offsetWidth, h = shell.offsetHeight; // grow from the note's size to the full frame
   bodyPanel.style.width = bodyPanel.offsetWidth + 'px'; // the text keeps its line breaks while the frame grows
+  setRoom(id, w, h);
   setGrow(el, w);
   shell.classList.add('opening'); shell.style.width = el.offsetWidth + 'px'; shell.style.height = el.offsetHeight + 'px';
   shell.getBoundingClientRect();
@@ -1138,6 +1203,7 @@ function hideBody() {
   if (bodyPanel.hidden && !bodyShell) return;
   if (document.activeElement === bodyText) bodyText.blur();
   const shell = bodyShell, el = shell && shell.parentNode; bodyShell = null;
+  setRoom(null);
   bodyPanel.hidden = true; document.body.appendChild(bodyPanel); // parked outside the canvas until the next note
   closeShell(shell, el);
 }
@@ -1146,6 +1212,7 @@ function fitBody() {} // the frame grows with its text
 function positionBody() {
   const el = bodyShell && bodyFor && els[bodyFor]; if (!el || bodyShell.parentNode !== el) return;
   shellMetrics(el, bodyShell); if (!bodyShell.classList.contains('opening')) setGrow(el, bodyShell.offsetWidth);
+  if (shellSteady()) setRoom(bodyFor, bodyShell.offsetWidth, bodyShell.offsetHeight);
 }
 bodyText.addEventListener('focus', () => { if (editingId) commitEdit(); bodyDirty = false; });
 bodyText.addEventListener('input', () => {
@@ -1155,7 +1222,7 @@ bodyText.addEventListener('input', () => {
   if (v.trim()) n.body = v; else delete n.body;
   bodyPanel.classList.toggle('empty', !v);
   fitBody(); positionBody();
-  render(); scheduleSave();
+  render(); if (n.pin) { positionBody(); relayout(); } scheduleSave();
 });
 bodyText.addEventListener('keydown', e => {
   e.stopPropagation();
@@ -1453,7 +1520,7 @@ function insertNotes(pack, { keepParents = false, at = null } = {}) {
   if (at && tops.length) { dx = Math.round(at.x - Math.min(...tops.map(n => n.x))); dy = Math.round(at.y - Math.min(...tops.map(n => n.y))); }
   for (const src of pack.nodes) {
     const n = JSON.parse(JSON.stringify(src));
-    n.id = map[src.id]; n.x += dx; n.y += dy;
+    n.id = map[src.id]; n.x += dx; n.y += dy; delete n.pin;
     touch();
     if (inSet.has(src.parentId)) n.parentId = map[src.parentId];
     else if (!(keepParents && src.parentId && N(src.parentId))) {
@@ -1635,6 +1702,29 @@ function reparent(id, newParent) {
 /* ---- hand placement: with auto-arrange off, a dragged note keeps a nudge from its arranged spot,
    stored per zoom level (how many levels are unfolded), relative to its parent ---- */
 const lastNudgeY = {};
+const unrolling = new Set();
+const repin = ids => { for (const m of ids) { const n = N(m); if (n && n.pin) { n.pin.x = Math.round(n.x); n.pin.y = Math.round(n.y); } } };
+// middle click: nail a note to the board where it is, at the size it has now; again to take the nail out
+function togglePin(id) {
+  const n = N(id); if (!n || isHidden(n)) return;
+  if (editingId) commitEdit();
+  checkpoint();
+  if (n.pin) { delete n.pin; delete measuredScale[id]; }
+  else n.pin = { x: Math.round(n.x), y: Math.round(n.y), s: +(scaleNow[id] || 1).toFixed(4) };
+  touch(); lastDepth = -1;
+  render(); relayout(); scheduleSave(); updateToolbar();
+  const el = els[id]; if (!el || !n.pin) return;
+  el.classList.remove('pin-hit'); void el.offsetWidth; el.classList.add('pin-hit');
+  setTimeout(() => el.classList.remove('pin-hit'), 520);
+  const pb = el.querySelector(':scope > .pin-body');
+  if (pb && !el.classList.contains('nb-open')) { // the description unrolls as the nail goes in
+    const h = pb.offsetHeight;
+    pb.style.height = '0px'; pb.style.opacity = '0'; void pb.offsetHeight;
+    pb.classList.add('unroll'); pb.style.height = h + 'px'; pb.style.opacity = '';
+    unrolling.add(id); // nothing may measure the note while it is half open
+    setTimeout(() => { pb.classList.remove('unroll'); pb.style.height = ''; unrolling.delete(id); const z = sizeCache[id]; measure(); const a = sizeCache[id]; if (z && a && (Math.abs(z.h - a.h) > 0.5 || Math.abs(z.w - a.w) > 0.5)) relayout(); }, 300);
+  }
+}
 function zoomLevel(k = doc.view.k) { let d = 1; while (d < 60 && levelP(d + 1, k) >= 1) d++; return d; }
 function nudgeOf(n, k = doc.view.k) {
   if (!n.nudge) return { x: 0, y: 0 };
@@ -1649,6 +1739,7 @@ function addNudge(n, dx, dy) {
   if (!Object.keys(n.nudge).length) delete n.nudge;
 }
 function layoutTargets(onlyId) {
+  if (room && shellSteady() && bodyShell.parentNode === els[room.id]) { room.w = bodyShell.offsetWidth; room.h = bodyShell.offsetHeight; } // the frame as it is at this zoom
   const pos = {};
   const sub = {};
   const shown = []; // tree notes that take up room now
@@ -1659,8 +1750,11 @@ function layoutTargets(onlyId) {
   const kidsOf = id => { const l = kidsMap[id]; if (!l) return NONE; if (!sorted.has(id)) { sorted.add(id); l.sort((a, b) => orderY(a) - orderY(b) || a.x - b.x); } return l; };
   const depth = {};
   const dOf = id => (depth[id] !== undefined ? depth[id] : (depth[id] = depthOf(N(id))));
-  const pk = id => kidsP(N(id)); // how unfolded this note's children are
-  const visKids = id => (pk(id) > 0 ? kidsOf(id) : []);
+  // a folded note with a pinned note under it still lays out the way down to that note
+  const pins = pinInfo(), pinKidsMemo = new Map();
+  const pinKids = id => { let v = pinKidsMemo.get(id); if (v === undefined) { v = pins.any ? kidsOf(id).filter(k => k.pin || pins.path.has(k.id)) : NONE; pinKidsMemo.set(id, v); } return v; };
+  const pk = id => { const v = kidsP(N(id)); return v > 0 || !pins.any ? v : pinKids(id).length ? 1 : 0; }; // how unfolded this note's children are
+  const visKids = id => (kidsP(N(id)) > 0 ? kidsOf(id) : pins.any ? pinKids(id) : NONE);
   // spacing grows with the notes when zoomed out
   const ksMemo = new Map();
   const kidScale = id => { let v = ksMemo.get(id); if (v === undefined) { v = 1; for (const c of kidsMap[id] || NONE) { const sc = scaleNow[c.id] || 1; if (sc > v) v = sc; } ksMemo.set(id, v); } return v; };
@@ -1688,12 +1782,16 @@ function layoutTargets(onlyId) {
   // a subtree pulled away by its section no longer takes room among its siblings
   const detached = id => { const r = relOff(id); return r.x !== 0 || r.y !== 0; };
   const stackKids = id => visKids(id).filter(k => !detached(k.id));
+  // ext: room a branch needs below its own block (the open description of the selected note, passed up the tree)
+  const ext = {}, roomH = id => (room && room.id === id && !noteDragging() ? room.h : 0), roomW = id => (room && room.id === id && !noteDragging() ? room.w : 0);
   const measureSub = id => {
-    const all = visKids(id), kids = all.filter(k => !detached(k.id)), h = size(id).h, p = pk(id);
+    const all = visKids(id), kids = all.filter(k => !detached(k.id)), h = size(id).h, p = pk(id), rh = roomH(id);
     for (const k of all) if (detached(k.id)) measureSub(k.id);
-    if (!kids.length) return (sub[id] = h);
+    if (!kids.length) { ext[id] = Math.max(0, rh - h); return (sub[id] = h); }
     const sum = (kids.reduce((s, k) => s + measureSub(k.id), 0) + gapsSum(id, kids)) * p;
-    return (sub[id] = Math.max(h, sum));
+    const block = Math.max(h, sum), under = kids.reduce((s, k) => s + (ext[k.id] || 0), 0) * p;
+    ext[id] = Math.max(0, under - (block - sum) / 2, rh ? rh - (block + h) / 2 : 0);
+    return (sub[id] = block);
   };
   const place = (id, x, top) => {
     const ro = relOff(id); x += ro.x; top += ro.y;
@@ -1702,7 +1800,7 @@ function layoutTargets(onlyId) {
     const s = size(id), p = pk(id);
     pos[id] = { x, y: top + (sub[id] - s.h) / 2 };
     if (!visKids(id).length) { tuck(id, pos[id]); return; } // folded away behind their parent
-    const cx = x + s.w + gx(id) * (0.45 + 0.55 * p);
+    const cx = x + Math.max(s.w, roomW(id)) + gx(id) * (0.45 + 0.55 * p);
     // detached kids that moved together (same offset) stack as their own group, centred on the parent
     const groups = {};
     for (const k of visKids(id)) if (detached(k.id)) { const r = relOff(k.id), key = r.x + ',' + r.y; (groups[key] = groups[key] || []).push(k); }
@@ -1712,7 +1810,7 @@ function layoutTargets(onlyId) {
       list.forEach((k, i) => {
         const slot = sub[k.id] * p;
         place(k.id, cx, cy + (slot - sub[k.id]) / 2);
-        if (i < list.length - 1) cy += slot + gapAfter(id, list, i) * p;
+        if (i < list.length - 1) cy += slot + ((ext[k.id] || 0) + gapAfter(id, list, i)) * p;
       });
     };
     for (const g of Object.values(groups)) stack(g);
@@ -1721,26 +1819,27 @@ function layoutTargets(onlyId) {
     // the kids that stay in the tree make way for any group a section pulled away, so nothing ends up over its frame
     const fixed = Object.values(groups);
     if (!fixed.length || !kids.length) return;
-    const gap = Math.max(gy(id), 14 * secM);
-    for (const g of fixed) {
-      const F = g.map(k => subBox(k.id)).reduce(unionBox);
-      const fc = (F.y0 + F.y1) / 2;
-      const boxes = kids.map(k => subBox(k.id));
-      const centre = i => (boxes[i].y0 + boxes[i].y1) / 2;
-      const idx = kids.map((k, i) => i);
-      const above = idx.filter(i => centre(i) < fc).reverse(), below = idx.filter(i => centre(i) >= fc);
-      for (const [list, dir] of [[above, -1], [below, 1]]) {
-        const obst = [F];
-        for (const i of list) {
-          const b = boxes[i];
-          let need = 0;
-          for (const o of obst) {
-            if (b.x0 >= o.x1 + gap || b.x1 <= o.x0 - gap) continue;
-            need = dir < 0 ? Math.min(need, o.y0 - gap - b.y1) : Math.max(need, o.y1 + gap - b.y0);
-          }
-          if (need) { shiftSub(kids[i].id, need); b.y0 += need; b.y1 += need; }
-          obst.push(b);
+    for (const g of fixed) pushAway(id, kids, g.map(k => subBox(k.id)).reduce(unionBox));
+  };
+  // the children of pid in `kids` move up or down, whichever side they are on, until they are clear of the box F
+  const pushAway = (pid, kids, F) => {
+    const gap = Math.max(gy(pid), 14 * secM);
+    const fc = (F.y0 + F.y1) / 2;
+    const boxes = kids.map(k => subBox(k.id));
+    const centre = i => (boxes[i].y0 + boxes[i].y1) / 2;
+    const idx = kids.map((k, i) => i);
+    const above = idx.filter(i => centre(i) < fc).reverse(), below = idx.filter(i => centre(i) >= fc);
+    for (const [list, dir] of [[above, -1], [below, 1]]) {
+      const obst = [F];
+      for (const i of list) {
+        const b = boxes[i];
+        let need = 0;
+        for (const o of obst) {
+          if (b.x0 >= o.x1 + gap || b.x1 <= o.x0 - gap) continue;
+          need = dir < 0 ? Math.min(need, o.y0 - gap - b.y1) : Math.max(need, o.y1 + gap - b.y0);
         }
+        if (need) { shiftSub(kids[i].id, need); b.y0 += need; b.y1 += need; }
+        obst.push(b);
       }
     }
   };
@@ -1753,7 +1852,34 @@ function layoutTargets(onlyId) {
     return b;
   };
   const unionBox = (a, b) => ({ x0: Math.min(a.x0, b.x0), x1: Math.max(a.x1, b.x1), y0: Math.min(a.y0, b.y0), y1: Math.max(a.y1, b.y1) });
-  const shiftSub = (id, dy) => { pos[id].y += dy; for (const k of kidsOf(id)) if (pos[k.id]) shiftSub(k.id, dy); };
+  const shiftSub = (id, dy, dx = 0) => { pos[id].y += dy; pos[id].x += dx; for (const k of kidsOf(id)) if (pos[k.id]) shiftSub(k.id, dy, dx); };
+  // pinned notes stay where they were pinned: the first one found moves its whole tree there, any other brings what hangs under it
+  // A pinned note that left its place in the stack this way has its siblings make way for it.
+  const holdsPin = new Map(), hasPin = id => { let v = holdsPin.get(id); if (v === undefined) { v = !!N(id).pin || kidsOf(id).some(k => hasPin(k.id)); holdsPin.set(id, v); } return v; };
+  const pinFix = (id, st) => {
+    const n = N(id);
+    if (n.pin && pos[id]) {
+      const dx = n.pin.x - pos[id].x, dy = n.pin.y - pos[id].y, whole = st.root && !st.done;
+      shiftSub(whole ? st.root : id, dy, dx); st.done = true; (st.all = st.all || []).push(id);
+      if (!whole && (Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5) && n.parentId && N(n.parentId) && pos[n.parentId]) (st.out = st.out || []).push(id);
+    }
+    for (const k of visKids(id)) pinFix(k.id, st);
+    if (st.all && st.all.length > 1 && id === (st.root || st.top)) { // two pinned siblings never sit on each other: the lower one gives way, and is pinned there
+      const fam = {}; for (const a of st.all) { const pid = N(a).parentId; if (pid && N(pid)) (fam[pid] = fam[pid] || []).push(a); }
+      for (const list of Object.values(fam)) {
+        if (list.length < 2) continue;
+        list.sort((a, b) => pos[a].y - pos[b].y);
+        for (let i = 1; i < list.length; i++) for (let j = 0; j < i; j++) {
+          const a = list[j], b = list[i], sa = size(a), sb = size(b);
+          if (pos[b].x >= pos[a].x + sa.w || pos[b].x + sb.w <= pos[a].x) continue;
+          const dy = Math.ceil(pos[a].y + sa.h + 12 - pos[b].y);
+          if (dy > 0) { shiftSub(b, dy); N(b).pin.y = Math.round(pos[b].y); if (!st.out || !st.out.includes(b)) (st.out = st.out || []).push(b); }
+        }
+      }
+    }
+    if (st.out && id === (st.root || st.top)) for (const o of st.out) { const pid = N(o).parentId; pushAway(pid, visKids(pid).filter(k => k.id !== o && pos[k.id] && !hasPin(k.id)), subBox(o)); }
+    return st.done;
+  };
   { // every note this layout gives room to needs a true size, also one that is off the page right now
     const need = [], walk = id => { need.push(id); for (const k of visKids(id)) walk(k.id); };
     if (onlyId) walk(onlyId); else for (const r of roots()) walk(r.id);
@@ -1763,18 +1889,22 @@ function layoutTargets(onlyId) {
     measureSub(onlyId);
     const oo = relOff(onlyId);
     place(onlyId, N(onlyId).x - oo.x, N(onlyId).y - oo.y - (sub[onlyId] - size(onlyId).h) / 2);
+    if (pins.any) pinFix(onlyId, { done: true, top: onlyId });
     return pos;
   }
   const rs = roots().sort((a, b) => a.y - b.y || a.x - b.x);
   const boxes = [], frees = [];
   shown.length = 0;
   for (const r of rs) {
+    if (!kidsOf(r.id).length && r.pin) { pos[r.id] = { x: r.pin.x, y: r.pin.y }; continue; } // pinned: it does not make way
     if (!kidsOf(r.id).length) { pos[r.id] = { x: r.x, y: r.y - (r.push || 0) }; frees.push(r); continue; } // free notes stay put (r.push: how far a tree pushed it from there)
     measureSub(r.id);
     const ro = off(r.id), rx = r.x - ro.x; // place() adds the offset back
     let top = r.y - ro.y - (sub[r.id] - size(r.id).h) / 2;
     place(r.id, rx, top);
+    if (pins.any && pinFix(r.id, { root: r.id })) { boxes.push(subBox(r.id)); continue; } // held by a pin: other trees go around it
     const box = subBox(r.id), y0 = box.y0; // whole tree as drawn, including groups a section pulled away
+    box.y1 += ext[r.id] || 0; // and the open description hanging below it
     for (let guard = 0; guard < 200; guard++) {
       const hit = boxes.find(b => box.x0 < b.x1 + 40 && box.x1 > b.x0 - 40 && box.y0 < b.y1 + ROOT_GAP && box.y1 > b.y0 - ROOT_GAP);
       if (!hit) break;
@@ -2242,7 +2372,7 @@ viewport.addEventListener('pointerdown', e => {
       dragState = { type: 'marquee', sx: e.clientX, sy: e.clientY, moved: false, start: toWorld(e.clientX, e.clientY) };
       return;
     }
-    dragState = { type: 'pan', sx: e.clientX, sy: e.clientY, vx: view().x, vy: view().y };
+    dragState = { type: 'pan', sx: e.clientX, sy: e.clientY, vx: view().x, vy: view().y, pinId: e.button === 1 && id ? id : null };
     viewport.classList.add('panning');
     return;
   }
@@ -2368,7 +2498,10 @@ function endDrag(e) {
   const d = dragState; if (!d) return;
   dragState = null;
   viewport.classList.remove('panning');
-  if (d.type === 'pan') { updateToolbar(); updateSectionToolbar(); return; }
+  if (d.type === 'pan') {
+    if (d.pinId && e && e.type === 'pointerup' && Math.hypot(e.clientX - d.sx, e.clientY - d.sy) < 4) togglePin(d.pinId); // a middle click, not a pan
+    updateToolbar(); updateSectionToolbar(); return;
+  }
   if (d.type === 'marquee') {
     hideDraft();
     if (!d.moved || e.type === 'pointercancel') return;
@@ -2425,6 +2558,7 @@ function endDrag(e) {
         else { const t = (c => sectionAt(c.x, c.y))(noteCentre(n)); if (t) n.section = t; else delete n.section; for (const c of descendants(n.id)) if (set.has(c) && N(c)) delete N(c).section; }
       }
       if (autoOn()) alignWho = new Set(d.moving);
+      repin(d.moving);
       render(); relayout(); scheduleSave(); updateToolbar();
       return;
     }
@@ -2459,6 +2593,7 @@ function endDrag(e) {
         toast('Attached under “' + (p.text || 'note').split('\n')[0].slice(0, 30) + '”', 'Undo', undo);
       }
       if (autoOn()) alignWho = new Set(d.moving);
+      repin(d.moving);
       render(); relayout(); scheduleSave();
     } else if (e && e.type === 'pointerup' && !e.altKey && N(d.id) && els[d.id]) {
       if (d.focusKid) { // one click folds/unfolds; a double-click moves the focus into that child instead
@@ -3940,6 +4075,7 @@ deleteNode = indexed(deleteNode);
 deleteMany = indexed(deleteMany);
 insertNotes = indexed(insertNotes);
 applyScales = indexed(applyScales);
+togglePin = indexed(togglePin);
 
 /* ---------------- boot ---------------- */
 
