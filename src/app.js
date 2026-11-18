@@ -377,29 +377,31 @@ function applyView() {
         and a note is never bigger than its parent ---- */
 const BASE_PX = { sm: 13.5, md: 16, lg: 21 };
 const SHRINK = { sm: 0.5, md: 0.38, lg: 0.28 }; // 1 = shrinks with the canvas, 0 = never shrinks
-const CHILD_RATIO = 0.74, MIN_FONT = 7;
-// tree notes are sized by their level (root biggest); free-standing notes use S/M/L
-const TREE_PX = d => Math.max(8, 28 * Math.pow(0.74, d)); // each level about a quarter smaller than its parent
-const treeClass = d => (d === 0 ? 'lg' : d === 1 ? 'md' : 'sm');
+const CHILD_RATIO = 0.82, MIN_FONT = 7;
+// a tree's root keeps its own S/M/L size; each level below is a little smaller than its parent
+const rootSize = s => (BASE_PX[s] ? s : 'md');
+const TREE_PX = (d, rs) => Math.max(8, BASE_PX[rootSize(rs)] * Math.pow(CHILD_RATIO, d));
+const treeClass = (d, rs) => ['sm', 'md', 'lg'][Math.max(0, RANK[rootSize(rs)] - d)];
+const rootOf = n => { let r = n, g = 0; while (r.parentId && N(r.parentId) && g++ < 99) r = N(r.parentId); return r; };
 const isTree = n => !!(n.parentId && N(n.parentId)) || hasKids(n.id);
 function classOf(n, hasKids) {
   const inTree = (n.parentId && N(n.parentId)) || hasKids;
-  return inTree ? treeClass(depthOf(n)) : n.size;
+  return inTree ? treeClass(depthOf(n), rootOf(n).size) : n.size;
 }
 function computeScales(k) {
   const kids = {};
   for (const n of all()) { const pid = n.parentId && N(n.parentId) ? n.parentId : '_'; (kids[pid] = kids[pid] || []).push(n); }
   const out = {};
   const grow = cls => (k >= 1 ? 1 : Math.min(6, Math.pow(k, SHRINK[cls] - 1)));
-  const visit = (n, parentFont, d) => {
+  const visit = (n, parentFont, d, rs) => {
     const inTree = d > 0 || (kids[n.id] || []).length > 0;
-    const cls = inTree ? treeClass(d) : n.size;
-    let font = (inTree ? TREE_PX(d) : BASE_PX[cls]) * grow(cls);
+    const cls = inTree ? treeClass(d, rs) : n.size;
+    let font = (inTree ? TREE_PX(d, rs) : BASE_PX[cls]) * grow(cls);
     if (parentFont) font = Math.max(Math.min(font, parentFont * CHILD_RATIO), Math.min(MIN_FONT, parentFont * CHILD_RATIO));
     out[n.id] = font / BASE_PX[cls];
-    if (d < 60) for (const c of kids[n.id] || []) visit(c, font, d + 1);
+    if (d < 60) for (const c of kids[n.id] || []) visit(c, font, d + 1, rs);
   };
-  for (const r of kids['_'] || []) visit(r, 0, 0);
+  for (const r of kids['_'] || []) visit(r, 0, 0, r.size);
   return out;
 }
 const scaleNow = {};
@@ -712,7 +714,7 @@ function cull() {
   if (swept) sweepGone();
 }
 const sizedAt = {}; // id -> what its cached size was measured for
-const sizeKey = (n, inTree) => (scaleNow[n.id] || 1).toFixed(4) + '|' + (inTree ? 't' + depthOf(n) : 'f' + n.size);
+const sizeKey = (n, inTree) => (scaleNow[n.id] || 1).toFixed(4) + '|' + (inTree ? 't' + depthOf(n) + rootOf(n).size : 'f' + n.size);
 const sizedText = {}; // id -> the content its cached size was measured with
 const textKey = n => n.text + '\u0001' + ((n.images && n.images.length) || 0) + (n.body ? 'b' : '') + (n.pin ? '\u0001' + (n.body || '') + '\u0001' + ((n.bodyImages && n.bodyImages.length) || 0) : '');
 // a tree note's width comes from its level; pinned with its description open it is wider
@@ -1190,7 +1192,7 @@ function updateToolbar() {
   showBody(n);
   toolbar.hidden = nodeMenuFor !== n.id; // the size/colour bar shows only with the right-click menu
   if (toolbar.hidden) return;
-  const tree = isTree(n);
+  const tree = !!(n.parentId && N(n.parentId)); // a root keeps its own size; only the notes under it follow their level
   for (const b of toolbar.querySelectorAll('[data-size]')) {
     b.classList.toggle('active', !tree && b.dataset.size === n.size);
     b.disabled = tree;
@@ -1675,7 +1677,7 @@ function deleteMany(ids) {
   toast(`Deleted ${gone.size} notes`, 'Undo', undo);
 }
 function setSize(id, s) {
-  const n = N(id); if (!n || n.size === s || isTree(n)) return; // tree notes are sized by level
+  const n = N(id); if (!n || n.size === s || (n.parentId && N(n.parentId))) return; // notes under a parent are sized by level
   checkpoint(); n.size = s; render(); relayout(); scheduleSave();
 }
 function setColor(id, c) { const n = N(id); if (!n || (colorKey(n) || 'none') === c) return; checkpoint(); paintNote(n, c); render(); scheduleSave(); }
