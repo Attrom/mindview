@@ -178,7 +178,7 @@ let lastPointer = null; // where the cursor is, so zooming keeps that spot stead
 let focusId = null; const focusOpen = new Set();
 let focusScroll = 0, focusScrollGoal = 0, focusScrollRaf = 0; // screen px the focused note's children are scrolled by
 // how unfolded the children of n are (0..1)
-/* pinned notes (middle click): n.pin = true keeps the note's description open inside it. Nothing else changes:
+/* pinned notes (click the description mark): n.pin = true keeps the note's description open inside it. Nothing else changes:
    the note sizes, folds and moves like any other, and the layout simply gives it the room it takes. */
 function kidsP(n) {
   const d = depthOf(n) + 1;
@@ -610,7 +610,6 @@ function renderNode(n, el) {
     if (!bm) { bm = document.createElement('div'); bm.className = 'body-mark'; el.appendChild(bm); }
     const html = (hasBody ? '<svg viewBox="0 0 16 16"><path d="M4 5h8M4 8h8M4 11h5"/></svg>' : '') + (hasBodyImgs ? '<svg viewBox="0 0 16 16"><rect x="2.5" y="3.5" width="11" height="9" rx="1.5"/><path d="M3 11l3.2-3.2 2.3 2.3 1.6-1.6L13 11.5"/><circle cx="10.3" cy="6.3" r=".9"/></svg>' : '');
     if (bm.dataset.k !== html) { bm.innerHTML = html; bm.dataset.k = html; }
-    bm.title = 'Has more ' + (hasBody && hasBodyImgs ? 'text and images' : hasBody ? 'text' : 'images') + ': click the note to see it';
   } else if (bm) bm.remove();
   const jumps = jumpTargets(n.id);
   let jb = el.querySelector('.jump');
@@ -1670,7 +1669,7 @@ function reparent(id, newParent) {
    stored per zoom level (how many levels are unfolded), relative to its parent ---- */
 const lastNudgeY = {};
 const unrolling = new Set();
-// middle click: keep the note's description open; again to close it
+// the description mark (top right of a note): keep the note's description open; again to close it
 function togglePin(id) {
   const n = N(id); if (!n || isHidden(n)) return;
   if (editingId) commitEdit();
@@ -2248,6 +2247,11 @@ viewport.addEventListener('pointerdown', e => {
     if (t.length === 1) focusNote(t[0], id); else openJumpMenu(id, e.clientX, e.clientY);
     return;
   }
+  if (nodeEl && e.target.closest('.body-mark') && e.button === 0 && !spaceDown) { // the description mark keeps the description open, or closes it
+    e.preventDefault(); e.stopPropagation();
+    togglePin(id);
+    return;
+  }
   if (nodeEl && e.button === 0 && !spaceDown && e.target.closest('.thumb')) {
     e.preventDefault(); e.stopPropagation();
     const th = e.target.closest('.thumb');
@@ -2302,7 +2306,7 @@ viewport.addEventListener('pointerdown', e => {
       dragState = { type: 'marquee', sx: e.clientX, sy: e.clientY, moved: false, start: toWorld(e.clientX, e.clientY) };
       return;
     }
-    dragState = { type: 'pan', sx: e.clientX, sy: e.clientY, vx: view().x, vy: view().y, pinId: e.button === 1 && id ? id : null };
+    dragState = { type: 'pan', sx: e.clientX, sy: e.clientY, vx: view().x, vy: view().y };
     viewport.classList.add('panning');
     return;
   }
@@ -2429,7 +2433,6 @@ function endDrag(e) {
   dragState = null;
   viewport.classList.remove('panning');
   if (d.type === 'pan') {
-    if (d.pinId && e && e.type === 'pointerup' && Math.hypot(e.clientX - d.sx, e.clientY - d.sy) < 4) togglePin(d.pinId); // a middle click, not a pan
     updateToolbar(); updateSectionToolbar(); return;
   }
   if (d.type === 'marquee') {
