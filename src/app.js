@@ -384,6 +384,7 @@ const TREE_PX = (d, rs) => Math.max(8, BASE_PX[rootSize(rs)] * Math.pow(CHILD_RA
 const treeClass = (d, rs) => ['sm', 'md', 'lg'][Math.max(0, RANK[rootSize(rs)] - d)];
 const rootOf = n => { let r = n, g = 0; while (r.parentId && N(r.parentId) && g++ < 99) r = N(r.parentId); return r; };
 const isTree = n => !!(n.parentId && N(n.parentId)) || hasKids(n.id);
+const isChild = n => !!(n && n.parentId && N(n.parentId)); // placed by its tree; roots and free notes are placed by hand
 function classOf(n, hasKids) {
   const inTree = (n.parentId && N(n.parentId)) || hasKids;
   return inTree ? treeClass(depthOf(n), rootOf(n).size) : n.size;
@@ -733,7 +734,7 @@ function sizeUp(ids) {
     if (old && was && sizedText[id] === textKey(n) && was.slice(was.indexOf('|')) === key.slice(key.indexOf('|')) && goneNow.has(id) && measuredScale[id]) {
       const f = sc / measuredScale[id];
       const z = { w: old.w * f, h: old.h * f };
-      if (!inTree) { n.x -= (z.w - old.w) / 2; n.y -= (z.h - old.h) / 2; } // a free note grows around its centre (as in measure)
+      if (!isChild(n)) { n.x -= (z.w - old.w) / 2; n.y -= (z.h - old.h) / 2; } // a free note or a root grows around its centre (as in measure)
       sizeCache[id] = z; measuredScale[id] = sc; sizedAt[id] = key;
       continue;
     }
@@ -744,7 +745,7 @@ function sizeUp(ids) {
   for (const [id, n, el, inTree] of need) { if (goneNow.has(id)) back.push(id); ungone(id); el.style.width = inTree ? treeWidth(n) : ''; }
   for (const [id, n, el, inTree, key] of need) {
     const z = { w: el.offsetWidth, h: el.offsetHeight }, old = sizeCache[id], sc = scaleNow[id] || 1;
-    if (old && !inTree && measuredScale[id] !== undefined && measuredScale[id] !== sc && id !== (dragState && dragState.id)) { n.x -= (z.w - old.w) / 2; n.y -= (z.h - old.h) / 2; el.style.left = n.x + 'px'; el.style.top = n.y + 'px'; }
+    if (old && !isChild(n) && measuredScale[id] !== undefined && measuredScale[id] !== sc && id !== (dragState && dragState.id)) { n.x -= (z.w - old.w) / 2; n.y -= (z.h - old.h) / 2; el.style.left = n.x + 'px'; el.style.top = n.y + 'px'; }
     sizeCache[id] = z; measuredScale[id] = sc; sizedAt[id] = key; sizedText[id] = textKey(n);
   }
   for (const id of back) gone(id); // straight back off the page
@@ -764,7 +765,7 @@ function measure() {
     const el = els[id], z = { w: el.offsetWidth, h: el.offsetHeight }, old = sizeCache[id], n = N(id), sc = scaleNow[id] || 1;
     if (n) { sizedAt[id] = sizeKey(n, tree.has(id)); sizedText[id] = textKey(n); }
     // a free note that grew or shrank with the zoom does so around its centre, so notes lined up at one zoom stay lined up at every zoom
-    if (n && old && !tree.has(id) && measuredScale[id] !== undefined && measuredScale[id] !== sc && id !== (dragState && dragState.id)) {
+    if (n && old && !isChild(n) && measuredScale[id] !== undefined && measuredScale[id] !== sc && id !== (dragState && dragState.id)) {
       n.x -= (z.w - old.w) / 2; n.y -= (z.h - old.h) / 2; el.style.left = n.x + 'px'; el.style.top = n.y + 'px';
     }
     measuredScale[id] = sc; sizeCache[id] = z;
@@ -773,7 +774,7 @@ function measure() {
 }
 // In files and undo steps a free note's x,y is its top-left corner at 100% zoom; on screen it is kept centred on the same spot.
 const measuredScale = {};
-const freeOff = n => { const sc = scaleNow[n.id] || 1, z = sizeCache[n.id]; return !z || sc === 1 || isTree(n) ? null : { x: (z.w - z.w / sc) / 2, y: (z.h - z.h / sc) / 2 }; };
+const freeOff = n => { const sc = scaleNow[n.id] || 1, z = sizeCache[n.id]; return !z || sc === 1 || isChild(n) ? null : { x: (z.w - z.w / sc) / 2, y: (z.h - z.h / sc) / 2 }; };
 function canonNodes() {
   const out = {}, r = v => Math.round(v * 100) / 100;
   for (const n of all()) {
@@ -820,7 +821,7 @@ function spreadBoxes(u, m) {
       let r = n, g = 0; while (r.parentId && N(r.parentId) && g++ < 60) r = N(r.parentId);
       const rz = size(r.id), rc = centre100(r);
       c = { x: rc.x + (cx - (r.x + rz.w / 2)) / sc, y: rc.y + (cy - (r.y + rz.h / 2)) / sc };
-    } else c = isTree(n) ? { x: n.x + z.w / sc / 2, y: n.y + z.h / sc / 2 } : { x: cx, y: cy }; // a tree root keeps its corner, a free note its centre
+    } else c = { x: cx, y: cy }; // a root or a free note keeps its centre
     return (c100[n.id] = c);
   };
   for (const id of u.ids) {
@@ -2020,7 +2021,7 @@ function layoutTargets(onlyId) {
 const ALIGN_NEAR = 24;
 let alignWho = null; // 'all' (Arrange) or the notes just moved (Auto): who the next layout may line up
 function alignLinked(pos, who) {
-  const free = id => N(id) && pos[id] && !isTree(N(id)) && !isHidden(N(id));
+  const free = id => N(id) && pos[id] && !isChild(N(id)) && !isHidden(N(id)); // roots line up like free notes
   const c = id => { const z = size(id); return { x: pos[id].x + z.w / 2, y: pos[id].y + z.h / 2 }; };
   for (const ax of ['x', 'y']) {
     const o = ax === 'x' ? 'y' : 'x', up = {}, find = i => (up[i] === undefined || up[i] === i ? i : (up[i] = find(up[i])));
