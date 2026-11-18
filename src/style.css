@@ -950,8 +950,7 @@ body.ai-mode #viewport { box-shadow: inset 0 0 0 2px var(--accent); }
 /* folded away and faded: off the page, so there is nothing to lay out or paint */
 .node.gone { display: none; }
 
-/* ---------- pinned notes: nailed to the board, description open ---------- */
-.node.pinned { box-shadow: 0 calc(1px * var(--s)) calc(2px * var(--s)) rgba(0,0,0,.4); }
+/* ---------- pinned notes: the description stays open inside the note ---------- */
 .node.pinned > .body-mark { display: none; }
 .node > .pin-body { padding-top: .74em; font-size: .963em; font-weight: 400; line-height: 1.5; cursor: inherit; transition: opacity .18s; }
 .node > .pin-body.unroll { overflow: hidden; transition: height .26s var(--ease), opacity .26s; }
@@ -962,15 +961,4 @@ body.ai-mode #viewport { box-shadow: inset 0 0 0 2px var(--accent); }
 .node > .pin-body .pb-imgs img { max-width: 100%; border-radius: 4px; }
 .node.nb-open > .pin-body { visibility: hidden; }
 .node.pinned > .nb-shell { min-height: calc(100% + 2 * var(--bw, 1.5px)); }
-/* far out it keeps its size on the board: a filled box, no words */
-.node.pinned.notext { scale: 1; }
 .node.notext > .pin-body { opacity: 0; }
-/* pressed onto the board: a short press, no tilt */
-.node.pin-hit { animation: pin-hit .5s cubic-bezier(.2,.9,.3,1); }
-@keyframes pin-hit {
-  0% { transform: scale(1.07); box-shadow: var(--shadow-lg); }
-  38% { transform: scale(1.07); box-shadow: var(--shadow-lg); }
-  50% { transform: scale(.955); }
-  68% { transform: scale(1.012); }
-  100% { transform: none; }
-}

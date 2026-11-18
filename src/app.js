@@ -178,42 +178,16 @@ let lastPointer = null; // where the cursor is, so zooming keeps that spot stead
 let focusId = null; const focusOpen = new Set();
 let focusScroll = 0, focusScrollGoal = 0, focusScrollRaf = 0; // screen px the focused note's children are scrolled by
 // how unfolded the children of n are (0..1)
-/* ---- pinned notes (middle click): n.pin = { x, y, s } is the place and the size the note keeps on the board.
-   It no longer grows when zooming out, so far out it turns into a filled box (state 1) and then leaves (state 0).
-   While it shows, the notes above it show too, and the tree is laid out around it (layoutTargets). ---- */
-const PIN_GONE_PX = 3.4;
-let anyPin = false;
-const pinPx = n => n.pin.s * BASE_PX[classOf(n, hasKids(n.id))] * doc.view.k;
-const pinState = n => { const px = pinPx(n); return px < PIN_GONE_PX ? 0 : px < READ_PX * 0.9 ? 1 : 2; };
-const NOPINS = { any: false, path: new Set(), off: new Set() };
-function pinInfo() {
-  if (!anyPin) return NOPINS;
-  const t = idx ? treeIndex() : null, k = doc.view.k;
-  if (t && t.pins && t.pinsK === k) return t.pins;
-  const path = new Set(), off = new Set(), on = [];
-  for (const n of all()) if (n.pin) { if (pinState(n)) on.push(n); else off.add(n.id); }
-  for (const n of on) {
-    const up = []; let p = n, g = 0, dead = false;
-    while (p && g++ < 99) { if (off.has(p.id)) { dead = true; break; } up.push(p.id); p = p.parentId && N(p.parentId); }
-    if (!dead) for (const id of up) path.add(id);
-  }
-  const r = { any: true, path, off };
-  if (t) { t.pins = r; t.pinsK = k; }
-  return r;
-}
-const underOff = (n, pi) => { let p = n, g = 0; while (p && g++ < 99) { if (pi.off.has(p.id)) return true; p = p.parentId && N(p.parentId); } return false; };
+/* pinned notes (middle click): n.pin = true keeps the note's description open inside it. Nothing else changes:
+   the note sizes, folds and moves like any other, and the layout simply gives it the room it takes. */
 function kidsP(n) {
-  if (n.pin) { const st = pinState(n); if (st === 0) return 0; if (st === 2) return 1; } // a pinned note keeps its children out, like a note in focus
   const d = depthOf(n) + 1;
   if (forcedDepth !== null || !focusId || !N(focusId)) return levelP(d);
   const fd = depthOf(N(focusId));
   if (d <= fd + 1) return levelP(d);
   return d === fd + 2 && focusOpen.has(n.id) ? 1 : 0;
 }
-const pOf = n => {
-  if (anyPin) { const pi = pinInfo(); if (pi.off.size && underOff(n, pi)) return 0; if (pi.path.has(n.id)) return 1; }
-  return n.parentId && N(n.parentId) ? kidsP(N(n.parentId)) : levelP(0);
-};
+const pOf = n => (n.parentId && N(n.parentId) ? kidsP(N(n.parentId)) : levelP(0));
 const isHidden = n => pOf(n) < 1; // levels only show once fully unfolded
 const kidsHidden = n => kidsP(n) <= 0;
 function clearFocus() {
@@ -265,7 +239,7 @@ function load(id) {
   for (const n of all()) {
     n.size = SIZES.includes(n.size) ? n.size : 'md';
     n.text = n.text || '';
-    if (n.pin && !(typeof n.pin === 'object' && [n.pin.x, n.pin.y, n.pin.s].every(Number.isFinite) && n.pin.s > 0)) delete n.pin;
+    if (n.pin) n.pin = true; else delete n.pin; // older files kept a place and a size here
     if ('collapsed' in n) { if (n.collapsed) wasFolded.push(n.id); delete n.collapsed; migrated = true; } // folding is now driven by zoom
   }
   doc.links = Array.isArray(doc.links) ? doc.links.filter(L => N(L.a) && N(L.b) && L.a !== L.b) : [];
@@ -322,10 +296,8 @@ function restore(from, to) {
   to.push(snapshot());
   if (editingSection) finishSectionLabel(false);
   const snap = JSON.parse(from.pop());
-  const hadPin = {}; for (const n of all()) hadPin[n.id] = !!n.pin;
   if (snap && snap.n) { doc.nodes = snap.n; doc.links = snap.l || []; doc.sections = snap.s || {}; } else doc.nodes = snap;
   touch();
-  for (const n of all()) if (hadPin[n.id] !== undefined && hadPin[n.id] !== !!n.pin) delete measuredScale[n.id]; // pinned or unpinned by this step: its size changes without a shift
   if (selectedId && !N(selectedId)) selectedId = null;
   if (selectedLink && !linkById(selectedLink)) selectedLink = null;
   if (selectedSection && !SEC(selectedSection)) selectedSection = null;
@@ -406,8 +378,7 @@ function computeScales(k) {
     const cls = inTree ? treeClass(d) : n.size;
     let font = (inTree ? TREE_PX(d) : BASE_PX[cls]) * grow(cls);
     if (parentFont) font = Math.max(Math.min(font, parentFont * CHILD_RATIO), Math.min(MIN_FONT, parentFont * CHILD_RATIO));
-    if (n.pin) font = n.pin.s * BASE_PX[cls]; // pinned: the size it had when it was pinned
-    out[n.id] = n.pin ? n.pin.s : font / BASE_PX[cls];
+    out[n.id] = font / BASE_PX[cls];
     if (d < 60) for (const c of kids[n.id] || []) visit(c, font, d + 1);
   };
   for (const r of kids['_'] || []) visit(r, 0, 0);
@@ -452,10 +423,8 @@ let gestureAnchor = null, gestureTimer = null;
 function onZoomChange() {
   const k = view().k;
   const md = maxDepthAt(k) * 2 + (levelP(maxDepthAt(k), k) >= 1 ? 1 : 0); // also re-render when a level finishes unfolding (badges)
-  let sig = md;
-  if (anyPin) { sig = md + ''; for (const n of all()) if (n.pin) sig += pinState(n); } // a pinned note turning into a box, or leaving
-  if (sig !== lastDepth) {
-    lastDepth = sig;
+  if (md !== lastDepth) {
+    lastDepth = md;
     if (editingId && editingId !== freshId && isHidden(N(editingId))) commitEdit();
     render(); // badges + visibility
   }
@@ -652,7 +621,6 @@ function renderNode(n, el) {
   } else if (jb) jb.remove();
 }
 function render() {
-  anyPin = false; for (const id in doc.nodes) if (doc.nodes[id].pin) { anyPin = true; break; }
   const live = new Set();
   for (const n of all()) {
     live.add(n.id);
@@ -782,7 +750,7 @@ function measure() {
 }
 // In files and undo steps a free note's x,y is its top-left corner at 100% zoom; on screen it is kept centred on the same spot.
 const measuredScale = {};
-const freeOff = n => { const sc = scaleNow[n.id] || 1, z = sizeCache[n.id]; return !z || sc === 1 || n.pin || isTree(n) ? null : { x: (z.w - z.w / sc) / 2, y: (z.h - z.h / sc) / 2 }; };
+const freeOff = n => { const sc = scaleNow[n.id] || 1, z = sizeCache[n.id]; return !z || sc === 1 || isTree(n) ? null : { x: (z.w - z.w / sc) / 2, y: (z.h - z.h / sc) / 2 }; };
 function canonNodes() {
   const out = {}, r = v => Math.round(v * 100) / 100;
   for (const n of all()) { const o = freeOff(n); out[n.id] = o ? { ...n, x: r(n.x + o.x), y: r(n.y + o.y) } : n; }
@@ -1702,21 +1670,17 @@ function reparent(id, newParent) {
    stored per zoom level (how many levels are unfolded), relative to its parent ---- */
 const lastNudgeY = {};
 const unrolling = new Set();
-const repin = ids => { for (const m of ids) { const n = N(m); if (n && n.pin) { n.pin.x = Math.round(n.x); n.pin.y = Math.round(n.y); } } };
-// middle click: nail a note to the board where it is, at the size it has now; again to take the nail out
+// middle click: keep the note's description open; again to close it
 function togglePin(id) {
   const n = N(id); if (!n || isHidden(n)) return;
   if (editingId) commitEdit();
   checkpoint();
-  if (n.pin) { delete n.pin; delete measuredScale[id]; }
-  else n.pin = { x: Math.round(n.x), y: Math.round(n.y), s: +(scaleNow[id] || 1).toFixed(4) };
-  touch(); lastDepth = -1;
+  if (n.pin) delete n.pin; else n.pin = true;
+  touch();
   render(); relayout(); scheduleSave(); updateToolbar();
   const el = els[id]; if (!el || !n.pin) return;
-  el.classList.remove('pin-hit'); void el.offsetWidth; el.classList.add('pin-hit');
-  setTimeout(() => el.classList.remove('pin-hit'), 520);
   const pb = el.querySelector(':scope > .pin-body');
-  if (pb && !el.classList.contains('nb-open')) { // the description unrolls as the nail goes in
+  if (pb && !el.classList.contains('nb-open')) { // the description unrolls open
     const h = pb.offsetHeight;
     pb.style.height = '0px'; pb.style.opacity = '0'; void pb.offsetHeight;
     pb.classList.add('unroll'); pb.style.height = h + 'px'; pb.style.opacity = '';
@@ -1749,11 +1713,8 @@ function layoutTargets(onlyId) {
   const kidsOf = id => { const l = kidsMap[id]; if (!l) return NONE; if (!sorted.has(id)) { sorted.add(id); l.sort((a, b) => orderY(a) - orderY(b) || a.x - b.x); } return l; };
   const depth = {};
   const dOf = id => (depth[id] !== undefined ? depth[id] : (depth[id] = depthOf(N(id))));
-  // a folded note with a pinned note under it still lays out the way down to that note
-  const pins = pinInfo(), pinKidsMemo = new Map();
-  const pinKids = id => { let v = pinKidsMemo.get(id); if (v === undefined) { v = pins.any ? kidsOf(id).filter(k => k.pin || pins.path.has(k.id)) : NONE; pinKidsMemo.set(id, v); } return v; };
-  const pk = id => { const v = kidsP(N(id)); return v > 0 || !pins.any ? v : pinKids(id).length ? 1 : 0; }; // how unfolded this note's children are
-  const visKids = id => (kidsP(N(id)) > 0 ? kidsOf(id) : pins.any ? pinKids(id) : NONE);
+  const pk = id => kidsP(N(id)); // how unfolded this note's children are
+  const visKids = id => (pk(id) > 0 ? kidsOf(id) : NONE);
   // spacing grows with the notes when zoomed out
   const ksMemo = new Map();
   const kidScale = id => { let v = ksMemo.get(id); if (v === undefined) { v = 1; for (const c of kidsMap[id] || NONE) { const sc = scaleNow[c.id] || 1; if (sc > v) v = sc; } ksMemo.set(id, v); } return v; };
@@ -1851,34 +1812,7 @@ function layoutTargets(onlyId) {
     return b;
   };
   const unionBox = (a, b) => ({ x0: Math.min(a.x0, b.x0), x1: Math.max(a.x1, b.x1), y0: Math.min(a.y0, b.y0), y1: Math.max(a.y1, b.y1) });
-  const shiftSub = (id, dy, dx = 0) => { pos[id].y += dy; pos[id].x += dx; for (const k of kidsOf(id)) if (pos[k.id]) shiftSub(k.id, dy, dx); };
-  // pinned notes stay where they were pinned: the first one found moves its whole tree there, any other brings what hangs under it
-  // A pinned note that left its place in the stack this way has its siblings make way for it.
-  const holdsPin = new Map(), hasPin = id => { let v = holdsPin.get(id); if (v === undefined) { v = !!N(id).pin || kidsOf(id).some(k => hasPin(k.id)); holdsPin.set(id, v); } return v; };
-  const pinFix = (id, st) => {
-    const n = N(id);
-    if (n.pin && pos[id]) {
-      const dx = n.pin.x - pos[id].x, dy = n.pin.y - pos[id].y, whole = st.root && !st.done;
-      shiftSub(whole ? st.root : id, dy, dx); st.done = true; (st.all = st.all || []).push(id);
-      if (!whole && (Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5) && n.parentId && N(n.parentId) && pos[n.parentId]) (st.out = st.out || []).push(id);
-    }
-    for (const k of visKids(id)) pinFix(k.id, st);
-    if (st.all && st.all.length > 1 && id === (st.root || st.top)) { // two pinned siblings never sit on each other: the lower one gives way, and is pinned there
-      const fam = {}; for (const a of st.all) { const pid = N(a).parentId; if (pid && N(pid)) (fam[pid] = fam[pid] || []).push(a); }
-      for (const list of Object.values(fam)) {
-        if (list.length < 2) continue;
-        list.sort((a, b) => pos[a].y - pos[b].y);
-        for (let i = 1; i < list.length; i++) for (let j = 0; j < i; j++) {
-          const a = list[j], b = list[i], sa = size(a), sb = size(b);
-          if (pos[b].x >= pos[a].x + sa.w || pos[b].x + sb.w <= pos[a].x) continue;
-          const dy = Math.ceil(pos[a].y + sa.h + 12 - pos[b].y);
-          if (dy > 0) { shiftSub(b, dy); N(b).pin.y = Math.round(pos[b].y); if (!st.out || !st.out.includes(b)) (st.out = st.out || []).push(b); }
-        }
-      }
-    }
-    if (st.out && id === (st.root || st.top)) for (const o of st.out) { const pid = N(o).parentId; pushAway(pid, visKids(pid).filter(k => k.id !== o && pos[k.id] && !hasPin(k.id)), subBox(o)); }
-    return st.done;
-  };
+  const shiftSub = (id, dy) => { pos[id].y += dy; for (const k of kidsOf(id)) if (pos[k.id]) shiftSub(k.id, dy); };
   { // every note this layout gives room to needs a true size, also one that is off the page right now
     const need = [], walk = id => { need.push(id); for (const k of visKids(id)) walk(k.id); };
     if (onlyId) walk(onlyId); else for (const r of roots()) walk(r.id);
@@ -1888,20 +1822,17 @@ function layoutTargets(onlyId) {
     measureSub(onlyId);
     const oo = relOff(onlyId);
     place(onlyId, N(onlyId).x - oo.x, N(onlyId).y - oo.y - (sub[onlyId] - size(onlyId).h) / 2);
-    if (pins.any) pinFix(onlyId, { done: true, top: onlyId });
     return pos;
   }
   const rs = roots().sort((a, b) => a.y - b.y || a.x - b.x);
   const boxes = [], frees = [];
   shown.length = 0;
   for (const r of rs) {
-    if (!kidsOf(r.id).length && r.pin) { pos[r.id] = { x: r.pin.x, y: r.pin.y }; continue; } // pinned: it does not make way
     if (!kidsOf(r.id).length) { pos[r.id] = { x: r.x, y: r.y - (r.push || 0) }; frees.push(r); continue; } // free notes stay put (r.push: how far a tree pushed it from there)
     measureSub(r.id);
     const ro = off(r.id), rx = r.x - ro.x; // place() adds the offset back
     let top = r.y - ro.y - (sub[r.id] - size(r.id).h) / 2;
     place(r.id, rx, top);
-    if (pins.any && pinFix(r.id, { root: r.id })) { boxes.push(subBox(r.id)); continue; } // held by a pin: other trees go around it
     const box = subBox(r.id), y0 = box.y0; // whole tree as drawn, including groups a section pulled away
     box.y1 += ext[r.id] || 0; // and the open description hanging below it
     for (let guard = 0; guard < 200; guard++) {
@@ -2557,7 +2488,6 @@ function endDrag(e) {
         else { const t = (c => sectionAt(c.x, c.y))(noteCentre(n)); if (t) n.section = t; else delete n.section; for (const c of descendants(n.id)) if (set.has(c) && N(c)) delete N(c).section; }
       }
       if (autoOn()) alignWho = new Set(d.moving);
-      repin(d.moving);
       render(); relayout(); scheduleSave(); updateToolbar();
       return;
     }
@@ -2592,7 +2522,6 @@ function endDrag(e) {
         toast('Attached under “' + (p.text || 'note').split('\n')[0].slice(0, 30) + '”', 'Undo', undo);
       }
       if (autoOn()) alignWho = new Set(d.moving);
-      repin(d.moving);
       render(); relayout(); scheduleSave();
     } else if (e && e.type === 'pointerup' && !e.altKey && N(d.id) && els[d.id]) {
       if (d.focusKid) { // one click folds/unfolds; a double-click moves the focus into that child instead
