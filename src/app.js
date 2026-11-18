@@ -299,6 +299,7 @@ function restore(from, to) {
   to.push(snapshot());
   if (editingSection) finishSectionLabel(false);
   const snap = JSON.parse(from.pop());
+  spreadReset();
   if (snap && snap.n) { doc.nodes = snap.n; doc.links = snap.l || []; doc.sections = snap.s || {}; } else doc.nodes = snap;
   touch();
   if (selectedId && !N(selectedId)) selectedId = null;
@@ -389,7 +390,9 @@ function computeScales(k) {
 }
 const scaleNow = {};
 // set each note's size for zoom k; returns ids whose size changed noticeably
+let scaleK = 1; // the zoom the notes are sized for now
 function applyScales(k, exact) {
+  scaleK = k;
   const changed = [], sc = computeScales(k);
   for (const id in sc) {
     const el = els[id]; if (!el) continue;
@@ -449,6 +452,7 @@ function onZoomChange() {
     putAt(n, pos[id]);
     if (!goneNow.has(id) && els[id]) { els[id].style.left = n.x + 'px'; els[id].style.top = n.y + 'px'; }
   }
+  if (spreadK !== null) spreadAll(); // the trees have their size for this zoom now: settle the sections' spread on it
   if (anchor) { // keep the note under the cursor still
     const after = centerOnScreen(anchor);
     view().x += pre.x - after.x; view().y += pre.y - after.y;
@@ -749,18 +753,122 @@ function measure() {
     }
     measuredScale[id] = sc; sizeCache[id] = z;
   }
+  spreadZoom();
 }
 // In files and undo steps a free note's x,y is its top-left corner at 100% zoom; on screen it is kept centred on the same spot.
 const measuredScale = {};
 const freeOff = n => { const sc = scaleNow[n.id] || 1, z = sizeCache[n.id]; return !z || sc === 1 || isTree(n) ? null : { x: (z.w - z.w / sc) / 2, y: (z.h - z.h / sc) / 2 }; };
 function canonNodes() {
   const out = {}, r = v => Math.round(v * 100) / 100;
-  for (const n of all()) { const o = freeOff(n); out[n.id] = o ? { ...n, x: r(n.x + o.x), y: r(n.y + o.y) } : n; }
+  for (const n of all()) {
+    const o = freeOff(n), a = spreadOf[n.id] && spreadAt[spreadOf[n.id]];
+    const dx = (o ? o.x : 0) - (a ? a.x : 0), dy = (o ? o.y : 0) - (a ? a.y : 0);
+    out[n.id] = dx || dy ? { ...n, x: r(n.x + dx), y: r(n.y + dy) } : n;
+  }
   return out;
 }
 function fromCanon() {
   for (const n of all()) { const o = freeOff(n); if (!o) continue; n.x -= o.x; n.y -= o.y; if (els[n.id]) { els[n.id].style.left = n.x + 'px'; els[n.id].style.top = n.y + 'px'; } }
   drawEdges();
+}
+/* ---- sections keep their distance when zoomed out ----
+   Notes grow when zoomed out, so each section's frame grows too. Sections that would come closer than they are at 100%
+   push each other apart (each with all its notes), so the gaps between them stay as they are at 100%.
+   On screen only: files and undo keep positions at 100% (canonNodes takes the shift back out). */
+const spreadAt = {}; // unit -> {x, y}: how far its notes are shifted now
+const spreadOf = {}; // note id -> its unit
+let spreadK = null;
+function spreadReset() { for (const u in spreadAt) delete spreadAt[u]; for (const id in spreadOf) delete spreadOf[id]; spreadK = null; }
+function spreadUnits() {
+  const units = new Map();
+  for (const n of all()) {
+    let r = n, g = 0; while (r.parentId && N(r.parentId) && g++ < 60) r = N(r.parentId);
+    let sid = effSec(r), sec = sid && SEC(sid); g = 0;
+    while (sec && sec.parent && SEC(sec.parent) && g++ < 20) sec = SEC(sec.parent);
+    const key = sec ? 's:' + sec.id : 'n:' + r.id;
+    let u = units.get(key); if (!u) units.set(key, u = { key, sec: !!sec, root: {}, ids: [] });
+    u.ids.push(n.id); spreadOf[n.id] = key;
+  }
+  return units;
+}
+// for each unit: its box as it is now (B1) and as it would be at 100% zoom (B0), both with the shift it has now
+function spreadBoxes(u, m) {
+  const b0 = { x0: Infinity, y0: Infinity, x1: -Infinity, y1: -Infinity }, b1 = { ...b0 };
+  const add = (b, cx, cy, hw, hh) => { b.x0 = Math.min(b.x0, cx - hw); b.x1 = Math.max(b.x1, cx + hw); b.y0 = Math.min(b.y0, cy - hh); b.y1 = Math.max(b.y1, cy + hh); };
+  const c100 = {}; // centre at 100% of each note
+  const centre100 = n => {
+    if (c100[n.id]) return c100[n.id];
+    const z = size(n.id), sc = scaleNow[n.id] || 1, cx = n.x + z.w / 2, cy = n.y + z.h / 2;
+    let c;
+    if (n.parentId && N(n.parentId)) { // a tree note: its distance from the root shrinks back with its scale
+      let r = n, g = 0; while (r.parentId && N(r.parentId) && g++ < 60) r = N(r.parentId);
+      const rz = size(r.id), rc = centre100(r);
+      c = { x: rc.x + (cx - (r.x + rz.w / 2)) / sc, y: rc.y + (cy - (r.y + rz.h / 2)) / sc };
+    } else c = isTree(n) ? { x: n.x + z.w / sc / 2, y: n.y + z.h / sc / 2 } : { x: cx, y: cy }; // a tree root keeps its corner, a free note its centre
+    return (c100[n.id] = c);
+  };
+  for (const id of u.ids) {
+    const n = N(id); if (!n || isHidden(n)) continue;
+    const z = size(id), sc = scaleNow[id] || 1, c = centre100(n);
+    add(b1, n.x + z.w / 2, n.y + z.h / 2, z.w / 2, z.h / 2);
+    add(b0, c.x, c.y, z.w / sc / 2, z.h / sc / 2);
+  }
+  if (b1.x0 === Infinity) return null;
+  if (u.sec) { // the frame around them
+    b0.x0 -= SEC_PAD; b0.x1 += SEC_PAD; b0.y0 -= SEC_TOP; b0.y1 += SEC_PAD;
+    b1.x0 -= SEC_PAD * m; b1.x1 += SEC_PAD * m; b1.y0 -= SEC_TOP * m; b1.y1 += SEC_PAD * m;
+  }
+  return { b0, b1 };
+}
+function shiftUnit(u, dx, dy) {
+  for (const id of u.ids) { const n = N(id); n.x += dx; n.y += dy; if (els[id]) { els[id].style.left = n.x + 'px'; els[id].style.top = n.y + 'px'; } }
+}
+function spreadAll() {
+  if (!doc.sections || !allSections().length) { if (Object.keys(spreadAt).length) { for (const u of spreadUnits().values()) { const a = spreadAt[u.key]; if (a) shiftUnit(u, -a.x, -a.y); } spreadReset(); } return; }
+  const k = spreadK, m = Math.max(1, 1 / k);
+  const units = [...spreadUnits().values()], geo = new Map();
+  for (const u of units) {
+    const g = spreadBoxes(u, m); if (!g) continue;
+    const a = spreadAt[u.key] || { x: 0, y: 0 };
+    geo.set(u, {
+      c0: { x: (g.b0.x0 + g.b0.x1) / 2 - a.x, y: (g.b0.y0 + g.b0.y1) / 2 - a.y }, // centre at 100%
+      c1: { x: (g.b1.x0 + g.b1.x1) / 2 - a.x, y: (g.b1.y0 + g.b1.y1) / 2 - a.y }, // centre now, before any shift
+      w0: g.b0.x1 - g.b0.x0, h0: g.b0.y1 - g.b0.y0, w1: g.b1.x1 - g.b1.x0, h1: g.b1.y1 - g.b1.y0,
+    });
+  }
+  // every frame starts on its place at 100%; two frames that now come closer than they are at 100% push each other
+  // apart (half each) along the side they face, until every gap is back to what it is at 100%
+  const secs = units.filter(u => u.sec && geo.has(u)).map(u => { const g = geo.get(u); return { u, g, p: { ...g.c0 } }; });
+  if (k < 1) for (let it = 0; it < 40; it++) {
+    let moved = false;
+    for (let i = 0; i < secs.length; i++) for (let j = i + 1; j < secs.length; j++) {
+      const A = secs[i], B = secs[j], ga = A.g, gb = B.g;
+      const gx0 = Math.abs(gb.c0.x - ga.c0.x) - (ga.w0 + gb.w0) / 2, gy0 = Math.abs(gb.c0.y - ga.c0.y) - (ga.h0 + gb.h0) / 2;
+      if (gx0 < 0 && gy0 < 0) continue; // overlapping already at 100%
+      const ax = gx0 >= gy0 ? 'x' : 'y', ox = ax === 'x' ? 'y' : 'x', sz = { x: 'w1', y: 'h1' };
+      const gapOther = Math.abs(B.p[ox] - A.p[ox]) - (ga[sz[ox]] + gb[sz[ox]]) / 2;
+      if (gapOther >= Math.max(ax === 'x' ? gy0 : gx0, 0)) continue; // side by side only diagonally: no need
+      const need = Math.max(ax === 'x' ? gx0 : gy0, 0) + (ga[sz[ax]] + gb[sz[ax]]) / 2;
+      const d = B.p[ax] - A.p[ax], have = Math.abs(d);
+      if (have >= need - 0.01) continue;
+      const dir = d !== 0 ? Math.sign(d) : Math.sign(gb.c0[ax] - ga.c0[ax]) || 1, push = (need - have) / 2;
+      A.p[ax] -= dir * push; B.p[ax] += dir * push; moved = true;
+    }
+    if (!moved) break;
+  }
+  const at = new Map(secs.map(q => [q.u, q.p]));
+  for (const u of units) {
+    const g = geo.get(u); if (!g) continue;
+    const a = spreadAt[u.key] || { x: 0, y: 0 }, p = at.get(u) || g.c0;
+    const t = k >= 1 ? { x: 0, y: 0 } : { x: p.x - g.c1.x, y: p.y - g.c1.y };
+    if (Math.abs(t.x - a.x) > 0.01 || Math.abs(t.y - a.y) > 0.01) shiftUnit(u, t.x - a.x, t.y - a.y);
+    spreadAt[u.key] = t;
+  }
+}
+// after the notes were measured at a new zoom
+function spreadZoom() {
+  const k = scaleK; if (k === spreadK || noteDragging() || (dragState && dragState.type === 'section-move')) return;
+  spreadK = k; spreadAll();
 }
 
 function edgePath(p, c) {
@@ -2851,6 +2959,7 @@ function liveApply(id, text) {
   const keep = { view: doc.view, viewSet: doc.viewSet };
   for (const k of Object.keys(doc)) if (!(k in d)) delete doc[k];
   Object.assign(doc, d, keep);
+  spreadReset();
   normalizeDoc();
   touch();
   if (selectedId && !N(selectedId)) selectedId = null;
@@ -3045,6 +3154,7 @@ window.addEventListener('resize', () => { positionToolbar(); positionSectionTool
 function resetCanvas() {
   if (editingId) commitEdit();
   if (saveTimer) saveNow();
+  spreadReset();
   cancelAnimationFrame(layoutAnim); cancelAnimationFrame(viewAnim);
   if (zoomRaf) { cancelAnimationFrame(zoomRaf); zoomRaf = null; zoomGoal = null; }
   if (editingSection) finishSectionLabel(true);
