@@ -7,7 +7,7 @@ const fs = require('fs');
 const crypto = require('crypto');
 const { merge3 } = require('./merge');
 
-const LOCAL_ONLY = ['view', 'viewSet', 'updated', 'needsTidy']; // per-person state: never sent
+const LOCAL_ONLY = ['view', 'viewSet', 'updated', 'needsTidy', 'folds']; // per-person state: never sent
 const PREFIX = 'mindview-live:';
 const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const clone = v => JSON.parse(JSON.stringify(v));

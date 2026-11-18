@@ -180,7 +180,21 @@ let focusScroll = 0, focusScrollGoal = 0, focusScrollRaf = 0; // screen px the f
 // how unfolded the children of n are (0..1)
 /* pinned notes (click the description mark): n.pin = true keeps the note's description open inside it. Nothing else changes:
    the note sizes, folds and moves like any other, and the layout simply gives it the room it takes. */
+// right-click the + of a note: its children fold away behind +N at every zoom until it is right-clicked again.
+// Kept per person in the file (doc.folds), never sent to others by live sync.
+const foldedByHand = id => !!(doc.folds && doc.folds.includes(id));
+function toggleFold(id) {
+  const n = N(id); if (!n || !childrenOf(id).length) return false;
+  const on = !foldedByHand(id);
+  doc.folds = (doc.folds || []).filter(f => f !== id && N(f));
+  if (on) doc.folds.push(id);
+  if (!doc.folds.length) delete doc.folds;
+  if (on && selectedId && selectedId !== id && isAncestor(id, selectedId)) select(id); // what was selected just folded away
+  render(); relayout(); scheduleSave();
+  return true;
+}
 function kidsP(n) {
+  if (doc.folds && doc.folds.includes(n.id)) return 0;
   const d = depthOf(n) + 1;
   if (forcedDepth !== null || !focusId || !N(focusId)) return levelP(d);
   const fd = depthOf(N(focusId));
@@ -2446,7 +2460,7 @@ viewport.addEventListener('pointerdown', e => {
   if (id === editingId) return; // let text selection happen
 
   if (e.target.classList.contains('fold')) {
-    e.stopPropagation(); select(id); toggleCollapse(id); return;
+    e.stopPropagation(); select(id); if (foldedByHand(id)) toggleFold(id); else toggleCollapse(id); return;
   }
 
   if (e.target.classList.contains('handle')) {
@@ -2745,6 +2759,7 @@ viewport.addEventListener('contextmenu', e => {
   if (jb) { openJumpMenu(jb.parentElement.dataset.id, e.clientX, e.clientY); return; }
   const under = document.elementFromPoint(e.clientX, e.clientY) || e.target;
   const nodeEl = under.closest && under.closest('.node:not(.zhide)');
+  if (nodeEl && under.closest('.handle, .fold') && toggleFold(nodeEl.dataset.id)) return; // fold or unfold its children
   if (nodeEl) openNodeMenu(nodeEl.dataset.id, e.clientX, e.clientY);
 });
 /* right-click a note: its context menu */
