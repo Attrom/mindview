@@ -3137,7 +3137,26 @@ $('#z-level').onclick = () => {
   animateView({ x: cx - (cx - v.x) * f, y: cy - (cy - v.y) * f, k: 1 }, 220);
 };
 
+// top of the help card: which build is running, and checking for a newer one
+let updReady = 0; // a newer build already downloaded: the button restarts into it
+function showUpdate(r) {
+  const b = $('#help-update');
+  b.disabled = false;
+  if (r.state === 'ready') { updReady = r.build; b.textContent = `Restart to update to build ${r.build}`; }
+  else if (r.state === 'latest') { b.textContent = 'Up to date'; b.disabled = true; }
+  else if (r.state === 'checking') { b.textContent = 'Checking…'; b.disabled = true; }
+  else if (r.state === 'off') { b.textContent = 'Running from source'; b.disabled = true; }
+  else b.textContent = 'Could not check. Try again';
+}
+$('#help-update').onclick = async () => {
+  if (!host || !host.checkUpdate) return;
+  if (updReady) { host.restart(); return; }
+  showUpdate({ state: 'checking' });
+  showUpdate(await host.checkUpdate());
+};
 function openHelp() {
+  $('.help-ver').hidden = !(host && host.build);
+  if (host && host.build) { $('#help-build').textContent = 'Mindview build ' + host.build(); if (!updReady) { const b = $('#help-update'); if (b.textContent !== 'Checking…') { b.disabled = false; b.textContent = 'Check for updates'; } } }
   if (host) $('#help-path').textContent = 'Your notes are saved automatically, one file per project, in ' + host.dataPath() + '\\projects';
   else $('#help-path').textContent = 'Browser preview: notes are saved in this browser only.';
   $('#help').hidden = false;

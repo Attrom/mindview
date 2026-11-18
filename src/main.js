@@ -611,20 +611,28 @@ function applyUpdate() {
   try { ofs.rmSync(updDir, { recursive: true, force: true }); } catch { /* next time */ }
   return done;
 }
-async function checkUpdate() {
-  if (!canUpdate) return;
+// result: { state: 'off' (running from source) | 'latest' | 'ready' (downloaded, applied on restart) | 'error', build }
+const waitingBuild = () => { try { return JSON.parse(ofs.readFileSync(path.join(updDir, 'version.json'), 'utf8')).build; } catch { return 0; } };
+let checking = null;
+function checkUpdate() { return checking || (checking = doCheckUpdate().finally(() => { checking = null; })); }
+async function doCheckUpdate() {
+  if (!canUpdate) return { state: 'off' };
   try {
-    const r = await fetch(updateUrl + 'version.json', { headers: { 'User-Agent': 'Mindview' } }); if (!r.ok) return;
-    const v = await r.json(); if (!(v.build > BUILD) || !/^[0-9a-f]{64}$/.test(v.sha256 || '')) return;
-    try { if (JSON.parse(ofs.readFileSync(path.join(updDir, 'version.json'), 'utf8')).build === v.build) return; } catch { /* nothing waiting */ }
-    const a = await fetch(updateUrl + 'app.asar', { headers: { 'User-Agent': 'Mindview' } }); if (!a.ok) return;
-    const buf = Buffer.from(await a.arrayBuffer()); if (sha256(buf) !== v.sha256) return;
+    const r = await fetch(updateUrl + 'version.json', { headers: { 'User-Agent': 'Mindview' }, cache: 'no-store' }); if (!r.ok) return { state: 'error' };
+    const v = await r.json(); if (!/^[0-9a-f]{64}$/.test(v.sha256 || '')) return { state: 'error' };
+    if (!(v.build > BUILD)) return { state: 'latest' };
+    if (waitingBuild() === v.build) return { state: 'ready', build: v.build };
+    const a = await fetch(updateUrl + 'app.asar', { headers: { 'User-Agent': 'Mindview' }, cache: 'no-store' }); if (!a.ok) return { state: 'error' };
+    const buf = Buffer.from(await a.arrayBuffer()); if (sha256(buf) !== v.sha256) return { state: 'error' };
     ofs.mkdirSync(updDir, { recursive: true });
     ofs.writeFileSync(path.join(updDir, 'app.bin'), buf);
     ofs.writeFileSync(path.join(updDir, 'version.json'), JSON.stringify({ build: v.build, sha256: v.sha256 }));
-  } catch (e) { console.error('update check failed', e.message); }
+    return { state: 'ready', build: v.build };
+  } catch (e) { console.error('update check failed', e.message); return { state: 'error' }; }
 }
 ipcMain.on('app:build', e => { e.returnValue = BUILD; });
+ipcMain.handle('app:checkUpdate', () => checkUpdate());
+ipcMain.on('app:restart', () => { app.relaunch(); app.quit(); }); // the waiting update is put in place on the way out (will-quit)
 
 app.whenReady().then(() => {
   if (applyUpdate()) { app.relaunch(); app.exit(0); return; } // a waiting update: start again as the new version

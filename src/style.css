@@ -252,6 +252,11 @@ body.desktop #titlebar { padding-right: 150px; }
   border-radius: 16px; box-shadow: var(--shadow-lg); padding: 20px 22px;
   animation: rise .2s var(--ease);
 }
+.help-ver { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; padding-bottom: 12px; border-bottom: 1px solid var(--line); font-size: 12.5px; color: var(--text-dim); }
+.help-ver[hidden] { display: none; }
+#help-update { font-size: 12.5px; color: var(--accent); padding: 3px 8px; border-radius: 7px; }
+#help-update:hover:not(:disabled) { background: var(--chrome-hover); }
+#help-update:disabled { color: var(--text-faint); cursor: default; }
 .help-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
 .help-title { font-size: 16px; font-weight: 600; }
 #help-close { font-size: 22px; line-height: 1; color: var(--text-dim); width: 30px; height: 30px; border-radius: 8px; }
