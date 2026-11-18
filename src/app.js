@@ -2689,6 +2689,7 @@ nodesLayer.addEventListener('keydown', e => {
 nodesLayer.addEventListener('input', () => {
   if (!editingId) return;
   measure(); drawEdges();
+  if (bodyFor === editingId) positionBody(); // the title wrapped onto more lines: the description moves down with it
 });
 nodesLayer.addEventListener('focusout', e => {
   if (editingId && els[editingId] && els[editingId].contains(e.target)) {
