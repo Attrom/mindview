@@ -1721,7 +1721,9 @@ function layoutTargets(onlyId) {
   const gy = id => GAP_Y * kidScale(id);
   // siblings whose own children are showing get extra room, so each family reads as a group
   const GROUP = 2.2;
-  const famP = id => (visKids(id).length ? pk(id) : 0);
+  // ...but only a family whose children stack up taller than the note itself: a child or two that fit beside it need no extra room
+  const kidsH = {}; // height of a note's stacked children, fully unfolded (set by measureSub)
+  const famP = id => (visKids(id).length && kidsH[id] > size(id).h + 0.5 ? pk(id) : 0);
   const secM = Math.max(1, 1 / doc.view.k);
   const secMemo = new Map();
   const secOf = n => { let v = secMemo.get(n.id); if (v === undefined) { v = effSec(n); secMemo.set(n.id, v); } return v; };
@@ -1747,7 +1749,8 @@ function layoutTargets(onlyId) {
     const all = visKids(id), kids = all.filter(k => !detached(k.id)), h = size(id).h, p = pk(id), rh = roomH(id);
     for (const k of all) if (detached(k.id)) measureSub(k.id);
     if (!kids.length) { ext[id] = Math.max(0, rh - h); return (sub[id] = h); }
-    const sum = (kids.reduce((s, k) => s + measureSub(k.id), 0) + gapsSum(id, kids)) * p;
+    kidsH[id] = kids.reduce((s, k) => s + measureSub(k.id), 0) + gapsSum(id, kids);
+    const sum = kidsH[id] * p;
     const block = Math.max(h, sum), under = kids.reduce((s, k) => s + (ext[k.id] || 0), 0) * p;
     ext[id] = Math.max(0, under - (block - sum) / 2, rh ? rh - (block + h) / 2 : 0);
     return (sub[id] = block);
