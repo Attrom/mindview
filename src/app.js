@@ -621,8 +621,7 @@ function renderNode(n, el) {
   } else if (fold) fold.remove();
   paintThumbs(el, n.images, 'note');
   el.classList.toggle('pinned', !!n.pin);
-  let ph = el.querySelector(':scope > .pin-head'), pb = el.querySelector(':scope > .pin-body');
-  if (n.pin && !ph) { ph = document.createElement('div'); ph.className = 'pin-head'; el.appendChild(ph); } else if (!n.pin && ph) ph.remove();
+  let pb = el.querySelector(':scope > .pin-body');
   const pinText = n.pin && n.body && n.body.trim() ? n.body : '', pinImgs = (n.pin && n.bodyImages) || [];
   if (pinText || pinImgs.length) { // pinned: the description stays open, as part of the note
     if (!pb) { pb = document.createElement('div'); pb.className = 'pin-body'; pb.innerHTML = '<div class="pb-imgs"></div><div class="pb-text"></div>'; el.insertBefore(pb, el.querySelector(':scope > .handle')); }

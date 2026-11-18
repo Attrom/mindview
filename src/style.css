@@ -953,11 +953,6 @@ body.ai-mode #viewport { box-shadow: inset 0 0 0 2px var(--accent); }
 /* ---------- pinned notes: nailed to the board, description open ---------- */
 .node.pinned { box-shadow: 0 calc(1px * var(--s)) calc(2px * var(--s)) rgba(0,0,0,.4); }
 .node.pinned > .body-mark { display: none; }
-.node > .pin-head {
-  position: absolute; left: 50%; top: -.36em; width: .72em; height: .72em; margin-left: -.36em; border-radius: 50%;
-  background: radial-gradient(circle at 36% 30%, #fff 0, #cfd2d8 30%, #858a94 78%, #5c6069 100%);
-  box-shadow: 0 .1em .16em rgba(0,0,0,.55), 0 0 0 .05em rgba(0,0,0,.25); pointer-events: none; z-index: 2;
-}
 .node > .pin-body { padding-top: .74em; font-size: .963em; font-weight: 400; line-height: 1.5; cursor: inherit; transition: opacity .18s; }
 .node > .pin-body.unroll { overflow: hidden; transition: height .26s var(--ease), opacity .26s; }
 .node > .pin-body .pb-text { white-space: pre-wrap; overflow-wrap: anywhere; color: color-mix(in srgb, var(--text) 82%, var(--bg)); font-family: var(--note-font, inherit); }
@@ -969,20 +964,13 @@ body.ai-mode #viewport { box-shadow: inset 0 0 0 2px var(--accent); }
 .node.pinned > .nb-shell { min-height: calc(100% + 2 * var(--bw, 1.5px)); }
 /* far out it keeps its size on the board: a filled box, no words */
 .node.pinned.notext { scale: 1; }
-.node.notext > .pin-body, .node.notext > .pin-head { opacity: 0; }
-/* the nail goes in */
+.node.notext > .pin-body { opacity: 0; }
+/* pressed onto the board: a short press, no tilt */
 .node.pin-hit { animation: pin-hit .5s cubic-bezier(.2,.9,.3,1); }
-.node.pin-hit > .pin-head { animation: pin-drop .5s cubic-bezier(.5,0,.9,.4); }
 @keyframes pin-hit {
-  0% { transform: scale(1.07) rotate(-1.2deg); box-shadow: var(--shadow-lg); }
-  38% { transform: scale(1.07) rotate(-1.2deg); box-shadow: var(--shadow-lg); }
+  0% { transform: scale(1.07); box-shadow: var(--shadow-lg); }
+  38% { transform: scale(1.07); box-shadow: var(--shadow-lg); }
   50% { transform: scale(.955); }
   68% { transform: scale(1.012); }
-  100% { transform: none; }
-}
-@keyframes pin-drop {
-  0% { transform: translateY(-1.6em) scale(2.4); opacity: 0; }
-  20% { opacity: 1; }
-  40% { transform: none; }
   100% { transform: none; }
 }
