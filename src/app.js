@@ -899,6 +899,24 @@ function deleteLink(id) {
   toast('Connection removed', 'Undo', undo);
 }
 
+// a section's link: bring the whole section into view and select it
+function focusSection(sid) {
+  if (!SEC(sid)) return;
+  clearFocus();
+  if (editingId) commitEdit();
+  if (selectedId) select(null);
+  const pad = 80, top = 44, W = innerWidth - pad * 2, H = innerHeight - top - pad * 2;
+  let k = view().k, sec = SEC(sid);
+  for (let it = 0; it < 4; it++) { // notes grow when zoomed out, so settle on a zoom
+    applyScales(k); measure(); fitSections(); sec = SEC(sid);
+    k = Math.min(1.1, Math.max(MIN_K, Math.min(W / sec.w, H / sec.h)));
+  }
+  const target = { k, x: innerWidth / 2 - (sec.x + sec.w / 2) * k, y: top + (innerHeight - top) / 2 - (sec.y + sec.h / 2) * k };
+  applyScales(view().k, true); measure(); fitSections();
+  animateView(target, 420);
+  setTimeout(() => selectSection(sid), 430);
+}
+
 // jump: move the view to a linked note (zooming in far enough for it to show)
 let jumpHistory = [];
 function focusNote(id, fromId) {
@@ -1285,7 +1303,8 @@ document.addEventListener('paste', e => {
     if (!n.url) { if (n.color && n.color !== 'none') n.preLink = n.color; n.color = 'none'; delete n.linkPlain; } // a new link turns the note blue; its old colour comes back if the link is removed
     n.url = /^www\./i.test(txt) ? 'https://' + txt : txt;
     render(); scheduleSave();
-    toast(/^mindview:/i.test(n.url) ? 'Shortcut attached: clicking the note brings the linked note into focus' : 'Link attached: clicking the note opens it');
+    const toSec = (m => m && !N(m[1]) && SEC(m[1]))(/^mindview:\/\/[^/]+\/(.+)$/i.exec(n.url));
+    toast(/^mindview:/i.test(n.url) ? (toSec ? 'Shortcut attached: clicking the note brings the section into view' : 'Shortcut attached: clicking the note brings the linked note into focus') : 'Link attached: clicking the note opens it');
     return;
   }
   const inBody = e.target.closest && e.target.closest('#note-body');
@@ -1332,7 +1351,7 @@ function openNoteLink(id) {
   if (m) { // a shortcut to another note: bring it into focus (switching project if it lives in another one)
     const pid = decodeURIComponent(m[1]), nid = m[2];
     if (host && pid !== currentId && store.list().some(p => p.id === pid)) openProject(pid);
-    if (N(nid)) { select(nid); focusBranch(nid); } else toast('The linked note no longer exists');
+    if (N(nid)) { select(nid); focusBranch(nid); } else if (SEC(nid)) focusSection(nid); else toast('The linked note no longer exists');
     return true;
   }
   if (!/^https?:\/\//i.test(n.url)) return false;
@@ -2763,6 +2782,7 @@ sectionToolbar.addEventListener('click', e => {
   const sid = selectedSection;
   if (b.dataset.color) setSectionColor(sid, b.dataset.color);
   else if (b.id === 'st-rename') startSectionLabel(sid);
+  else if (b.id === 'st-link') { copyText(noteLink(sid)); toast('Link copied: paste it onto a note to make that note a shortcut to this section'); }
   else if (b.id === 'st-delete') deleteSection(sid);
 });
 toolbar.addEventListener('click', e => {

@@ -23,7 +23,10 @@ const note = {
     description: { type: 'string', description: 'Longer text, shown only when the note is selected.' },
     color: { type: 'string', enum: COLORS },
     size: { type: 'string', enum: SIZES },
-    url: { type: 'string', description: 'Web link opened when the note is clicked. Empty string removes it.' },
+    url: { type: 'string', description: 'Link followed when the note is clicked: a web address, or a mindview:// link to a note or section (clicking brings it into view). Empty string removes it.' },
+    x: { type: 'number', description: 'Left edge on the canvas, top-level notes only. Notes are about 220 wide and 60 to 90 tall; leave about 40 between them.' },
+    y: { type: 'number', description: 'Top edge on the canvas, top-level notes only (y grows downwards).' },
+    section: { type: 'string', description: 'Put the note in this section (its id or label). Empty string takes it out. A section frame wraps its notes by itself.' },
   },
 };
 const TOOLS = [
@@ -36,6 +39,8 @@ const TOOLS = [
     inputSchema: { type: 'object', properties: { project: { type: 'string' }, ids: { type: 'array', items: { type: 'string' }, minItems: 1 } }, required: ['project', 'ids'] } },
   { name: 'link_notes', description: 'Draw an arrow between two notes that are not parent and child (or remove it with remove: true).',
     inputSchema: { type: 'object', properties: { project: { type: 'string' }, from: { type: 'string' }, to: { type: 'string' }, both_ways: { type: 'boolean' }, remove: { type: 'boolean' } }, required: ['project', 'from', 'to'] } },
+  { name: 'write_section', description: 'Add a section (a labelled frame around notes) or change one. Returns its id and its mindview:// link: put that link on a note (write_notes url) to make the note a shortcut to the section. Put notes in it with write_notes `section`; the frame fits around them by itself.',
+    inputSchema: { type: 'object', properties: { project: { type: 'string' }, id: { type: 'string', description: 'Existing section to change. Leave out to add one.' }, label: { type: 'string' }, color: { type: 'string', enum: COLORS }, parent: { type: 'string', description: 'A bigger section this one sits inside (id or label). Empty string: none.' } }, required: ['project'] } },
   { name: 'create_project', description: 'Create a new, empty project.', inputSchema: { type: 'object', properties: { name: { type: 'string' } }, required: ['name'] } },
   { name: 'mod_guide', description: 'How to change Mindview itself (its looks, shortcuts, behaviour, new features) by writing a mod: returns the guide, the map of the window, and the mods already installed. Give `id` to also get the source of one installed mod. Call this before save_mod.',
     inputSchema: { type: 'object', properties: { id: { type: 'string' } } } },
@@ -72,6 +77,13 @@ function makeOps(dataDir) {
   const save = (id, d) => { d.updated = Date.now(); const tmp = file(id) + '.tmp'; fs.writeFileSync(tmp, JSON.stringify(d, null, 1), 'utf8'); fs.renameSync(tmp, file(id)); };
   const kids = (d, id) => Object.values(d.nodes).filter(n => (n.parentId || null) === id || (id === null && n.parentId && !d.nodes[n.parentId])).sort((a, b) => a.y - b.y || a.x - b.x);
   const need = (d, id) => { const n = d.nodes[id]; if (!n) throw fail(`No note with id "${id}" in this project.`); return n; };
+  const linkTo = (pid, target) => 'mindview://' + encodeURIComponent(pid) + '/' + target;
+  const secOf = (d, v) => { // a section by id, or by its label
+    const all = Object.values(d.sections || {}), q = String(v || '').trim();
+    const hit = (d.sections || {})[q] || all.find(s => (s.label || '') === q) || all.find(s => (s.label || '').toLowerCase() === q.toLowerCase());
+    if (!hit) throw fail(`No section "${v}" in this project. Sections: ${all.map(s => `${s.label || '(no label)'} (${s.id})`).join(', ') || 'none'}.`);
+    return hit.id;
+  };
   const sectionOf = (d, n) => { let s = n; while (s && s.section === undefined && s.parentId) s = d.nodes[s.parentId]; return s && s.section && d.sections && d.sections[s.section] ? d.sections[s.section].label || '' : ''; };
   const line = (d, n, depth) => {
     const tags = [];
@@ -112,7 +124,26 @@ function makeOps(dataDir) {
         return { text: hits.length ? `${hits.length} note${hits.length > 1 ? 's' : ''} in "${d.name || id}" matching "${query}":\n` + hits.slice(0, 100).map(n => line(d, n, 0)).join('\n') : `Nothing in "${d.name || id}" matches "${query}".` };
       }
       const out = outline(d, null, 0, []), ar = arrows(d);
-      return { text: `Project "${d.name || id}" (id: ${id}), ${Object.keys(d.nodes).length} notes\n` + (out.join('\n') || '(empty)') + (ar.length ? '\n\nArrows:\n' + ar.join('\n') : '') };
+      const secs = Object.values(d.sections || {}).map(s => `[${s.id}] ${s.label || '(no label)'}${s.parent && d.sections[s.parent] ? `  (inside: ${d.sections[s.parent].label || s.parent})` : ''}  link: ${linkTo(id, s.id)}`);
+      return { text: `Project "${d.name || id}" (id: ${id}), ${Object.keys(d.nodes).length} notes\n` + (out.join('\n') || '(empty)') + (ar.length ? '\n\nArrows:\n' + ar.join('\n') : '') + (secs.length ? '\n\nSections:\n' + secs.join('\n') : '') };
+    },
+    write_section({ project, id: sid, label, color, parent }) {
+      const id = find(project), d = load(id);
+      if (color !== undefined && !COLORS.includes(color)) throw fail(`Unknown colour "${color}". Use one of: ${COLORS.join(', ')}.`);
+      d.sections = d.sections || {};
+      let s, verb = 'changed';
+      if (sid) s = d.sections[secOf(d, sid)];
+      else { // a frame with no notes yet: placed below everything, it wraps its notes once they are put in it
+        const ys = Object.values(d.nodes).map(n => n.y).concat(Object.values(d.sections).map(x => x.y + x.h));
+        const nid = 'sec' + uid();
+        s = d.sections[nid] = { id: nid, x: 0, y: (ys.length ? Math.max(...ys) : 0) + 300, w: 400, h: 200, label: '', color: 'none', parent: null, v: 2, ox: 0, oy: 0 };
+        verb = 'added';
+      }
+      if (label !== undefined) s.label = String(label);
+      if (color !== undefined) s.color = color;
+      if (parent !== undefined) { const p = parent === '' ? null : secOf(d, parent); if (p === s.id) throw fail('A section cannot sit inside itself.'); s.parent = p; }
+      save(id, d);
+      return { text: `${verb} section [${s.id}] ${s.label || '(no label)'}\nlink: ${linkTo(id, s.id)}`, changed: id };
     },
     write_notes({ project, notes }) {
       const id = find(project), d = load(id);
@@ -141,7 +172,14 @@ function makeOps(dataDir) {
         if (a.description !== undefined) { if (a.description) n.body = String(a.description); else delete n.body; }
         if (a.color !== undefined) n.color = a.color;
         if (a.size !== undefined) n.size = a.size;
-        if (a.url !== undefined) { if (a.url) { if (!/^https?:\/\//i.test(a.url)) throw fail('A link must start with http:// or https://'); n.url = a.url; } else delete n.url; }
+        if (a.url !== undefined) { if (a.url) { if (!/^(https?|mindview):\/\//i.test(a.url)) throw fail('A link must start with http://, https:// or mindview://'); n.url = a.url; } else delete n.url; }
+        if (a.x !== undefined || a.y !== undefined) {
+          if (n.parentId) throw fail(`[${n.id}] sits under another note, so its place comes from its parent. Only top-level notes take x and y.`);
+          if (a.x !== undefined) n.x = Math.round(Number(a.x) || 0);
+          if (a.y !== undefined) n.y = Math.round(Number(a.y) || 0);
+          delete n.nudge;
+        }
+        if (a.section !== undefined) { const s = a.section === '' ? null : secOf(d, a.section); if (s) n.section = s; else if (n.parentId) n.section = false; else delete n.section; }
       }
       save(id, d);
       return { text: done.join('\n'), changed: id };
