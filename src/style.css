@@ -473,7 +473,7 @@ kbd {
   color: var(--c); opacity: .85; line-height: 0; cursor: pointer;
   transition: opacity .15s, color .15s;
 }
-.node.pinned > .body-mark { opacity: 1; color: color-mix(in srgb, var(--accent) 70%, var(--c)); } /* description kept open */
+.node.pinned > .body-mark { opacity: 1; color: color-mix(in srgb, var(--text) 72%, var(--bg)); } /* description kept open: a light grey */
 .node .body-mark:hover { opacity: 1; color: var(--text); }
 .node .body-mark svg { width: 1em; height: 1em; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; }
 .node.notext .body-mark { opacity: 0; pointer-events: none; }
