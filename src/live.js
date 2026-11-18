@@ -1,11 +1,11 @@
 // Live sync: a project kept the same on every computer that has its link, as people work. No sign-in: the link holds a
 // long secret room name, and only someone with it can read or change the project. Runs in the main process.
 // The server (Supabase) keeps one copy of each room and a version number. Changes go up as whole documents and are
-// combined note by note with merge3 (share.js) when two people changed it at the same time. Pictures travel separately.
+// combined note by note with merge3 (merge.js) when two people changed it at the same time. Pictures travel separately.
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
-const { merge3 } = require('./share');
+const { merge3 } = require('./merge');
 
 const LOCAL_ONLY = ['view', 'viewSet', 'updated', 'needsTidy']; // per-person state: never sent
 const PREFIX = 'mindview-live:';

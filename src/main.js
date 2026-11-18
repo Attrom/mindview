@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, Menu, shell, screen, dialog, safeStorage, clipboard } = require('electron');
+const { app, BrowserWindow, ipcMain, Menu, shell, screen, dialog, clipboard } = require('electron');
 const crypto = require('crypto');
 const { pathToFileURL } = require('url');
 const path = require('path');
@@ -349,44 +349,6 @@ ipcMain.handle('mods:openFolder', () => {
   shell.openPath(modsDir); return true;
 });
 
-/* sharing through Git / GitHub (see share.js). The GitHub token is kept encrypted by the operating system */
-const { createShare } = require('./share');
-function getToken() {
-  const t = settings.github && settings.github.token; if (!t) return null;
-  try { return settings.github.enc ? safeStorage.decryptString(Buffer.from(t, 'base64')) : t; } catch { return null; }
-}
-function setToken(token) {
-  settings.github = settings.github || {};
-  if (!token) { delete settings.github.token; delete settings.github.enc; }
-  else if (safeStorage.isEncryptionAvailable()) { settings.github.token = safeStorage.encryptString(token).toString('base64'); settings.github.enc = true; }
-  else { settings.github.token = token; settings.github.enc = false; }
-  saveSettings(true);
-}
-const share = createShare({ dataDir, projectsDir, imagesDir, getToken, modFile: id => { const f = modFile(id); return f && f.file; }, ...(process.env.MINDVIEW_GITHUB_API ? { apiBase: process.env.MINDVIEW_GITHUB_API } : {}) }); // the env override is for tests
-// The app's own GitHub sign-in (an OAuth app with Device flow; the ID is public, there is no secret). With it, signing in is one button.
-const BUILT_IN_CLIENT_ID = 'Ov23li2RMoUbCFGUOqEy';
-const GH_KEY = /^(gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})$/;
-const clientId = () => (settings.github && settings.github.clientId) || BUILT_IN_CLIENT_ID;
-const shareApi = {
-  status: async id => ({ ...(await share.status(id)), clientId: clientId() }),
-  publish: (id, opts) => share.publish(id, opts),
-  openShared: spec => share.openShared(spec, slugify),
-  sync: (id, message) => share.sync(id, message),
-  history: id => share.history(id),
-  restore: (id, oid) => share.restore(id, oid),
-  invite: (id, name) => share.invite(id, name),
-  people: id => share.people(id),
-  unlink: id => share.unlink(id),
-  remove: id => share.remove(id),
-  signInToken: async token => { setToken(String(token || '').trim()); share.forget(); try { return await share.whoami(true); } catch (e) { setToken(null); share.forget(); throw e.code === 'AUTH' ? new Error('GitHub did not accept that key. Create a new one and try again.') : e; } },
-  setClientId: id => { settings.github = settings.github || {}; settings.github.clientId = String(id || '').trim(); saveSettings(true); return true; },
-  deviceStart: () => share.deviceStart(clientId()),
-  devicePoll: async code => { const r = await share.devicePoll(clientId(), code); if (r.token) { setToken(r.token); share.forget(); return { user: await share.whoami(true) }; } return r; },
-  signOut: () => { setToken(null); share.forget(); return true; },
-  clipKey: () => { const t = clipboard.readText().trim(); return GH_KEY.test(t) ? t : ''; }, // a GitHub key the user just copied
-  copy: text => { clipboard.writeText(String(text || '')); return true; },
-  openUrl: url => { if (/^https:\/\/(www\.)?github\.com\//.test(String(url))) shell.openExternal(url); return true; },
-};
 /* live sync (see live.js): a project kept the same on every computer with its link, as people work. No sign-in.
    The address and key are the public ones of Mindview's live server; the server only answers for rooms you know the name of. */
 const LIVE_URL = process.env.MINDVIEW_LIVE_URL || 'https://fslesctsfaoftckbeiuj.supabase.co';
@@ -397,17 +359,20 @@ const live = createLive({
   page: code => inPage(code),
   onChange: id => inPage(`liveChanged(${JSON.stringify(id)})`).catch(() => {}),
 });
-Object.assign(shareApi, {
+// the Share menu (its GitHub sharing was removed: live sync replaced it). Old GitHub sign-in data is cleared once.
+if (settings.github) { delete settings.github; saveSettings(true); }
+const shareApi = {
+  copy: text => { clipboard.writeText(String(text || '')); return true; },
   liveStatus: id => live.status(id),
   liveStart: id => live.start(id),
   liveJoin: link => live.join(link, slugify),
   liveStop: id => live.stop(id),
   liveEnd: id => live.end(id),
-});
+};
 ipcMain.handle('share:call', async (_e, method, ...args) => {
   try {
     if (!Object.prototype.hasOwnProperty.call(shareApi, method)) throw new Error('unknown');
-    if (['status', 'liveStatus', 'liveStart', 'liveStop', 'liveEnd', 'publish', 'sync', 'history', 'restore', 'invite', 'people', 'unlink'].includes(method) && !validId(args[0])) throw new Error('bad project id');
+    if (['liveStatus', 'liveStart', 'liveStop', 'liveEnd'].includes(method) && !validId(args[0])) throw new Error('bad project id');
     return { ok: await shareApi[method](...args) };
   } catch (e) { console.error('share', method, e); return { error: String(e && e.message || e), code: e && e.code }; }
 });

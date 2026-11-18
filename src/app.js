@@ -274,7 +274,6 @@ async function saveNow() {
     doc.updated = Date.now();
     await store.save(currentId, serialize());
     saveState.textContent = 'Saved'; saveState.className = 'save-state';
-    if (shareState && shareState.linked) { clearTimeout(shareDotTimer); shareDotTimer = setTimeout(refreshShare, 1200); }
   } catch (e) {
     console.error(e);
     saveState.textContent = 'Not saved!'; saveState.className = 'save-state error';
@@ -2799,10 +2798,9 @@ $('#btn-auto').onclick = () => {
 };
 function paintAuto() { $('#btn-auto').classList.toggle('on', autoOn()); }
 $('#btn-help').onclick = openHelp;
-/* ---------------- Share: versions and collaboration through Git (GitHub) ---------------- */
+/* ---------------- Share: live sync (live.js in the main process) ---------------- */
 const shareMenu = $('#share-menu'), shareBusy = $('#share-busy');
-let shareDotTimer = 0;
-let shareState = null, shareView = null, shareMsg = null, shareDevice = null, sharePoll = 0, shareHist = [], sharePeople = [];
+let shareView = null, shareMsg = null;
 const shareCall = async (method, ...args) => {
   if (!host || !host.share) throw new Error('Sharing works in the desktop app.');
   const r = await host.share(method, ...args);
@@ -2844,16 +2842,13 @@ function liveApply(id, text) {
 function liveChanged(id) { if (id === currentId) refreshShare(); }
 async function refreshShare() {
   try { liveState = await shareCall('liveStatus', currentId); } catch (_) { liveState = null; }
-  try { shareState = await shareCall('status', currentId); } catch (e) { shareState = { signedIn: false, linked: false }; shareMsg = { err: e.message }; }
-  $('#share-dot').hidden = !(shareState.linked && shareState.dirty);
-  if (shareState.linked && !shareMenu.hidden) { shareCall('history', currentId).then(h => { shareHist = h; if (!shareMenu.hidden) paintShare(); }).catch(() => {}); }
   if (!shareMenu.hidden) paintShare();
 }
-const ago = t => { const s = (Date.now() - t) / 1000; return s < 90 ? 'just now' : s < 3600 ? Math.round(s / 60) + ' min ago' : s < 86400 ? Math.round(s / 3600) + ' h ago' : new Date(t).toLocaleDateString(undefined, { day: 'numeric', month: 'short' }); };
 function paintShare() {
-  const st = shareState || {}; let h = '';
+  let h = '';
   const msg = shareMsg ? `<div class="${shareMsg.err ? 'sh-err' : 'sh-ok'}">${esc(shareMsg.err || shareMsg.ok)}</div>` : '';
-  if (host && host.share) {
+  if (!host || !host.share) h = '<div class="sh-note" style="padding-top:8px">Sharing works in the desktop app.</div>';
+  else {
     const lv = liveState || {};
     h += '<div class="pm-label">Live</div>';
     if (lv.live) {
@@ -2863,85 +2858,21 @@ function paintShare() {
       h += `<form class="pm-form" data-form="livejoin"><input id="sh-live" placeholder="Live link"><button class="pm-ok">Join</button></form>
         <div class="sh-note"><span class="sh-link" data-act="back">Back</span></div>`;
     } else h += '<button class="sh-big" data-act="live-start">Go live</button><button class="sh-big quiet" data-act="live-join">Join with a link</button>';
-    h += '<div class="pm-sep"></div>';
-  }
-  if (!host || !host.share) h = '<div class="sh-note" style="padding-top:8px">Sharing works in the desktop app.</div>';
-  else if (!st.signedIn) {
-    h += '<div class="pm-label">Share with GitHub</div>';
-    if (shareDevice) {
-      h += `<div class="sh-note">GitHub is open in your browser. Paste this code there (it is already copied) and press Authorize.</div><div class="sh-code">${esc(shareDevice.userCode)}</div>
-        <button class="sh-big" data-act="device-open">Open GitHub again</button><div class="sh-note">Waiting for you there… <span class="sh-link" data-act="device-cancel">Cancel</span></div>`;
-    } else if (shareView === 'token') {
-      h += `<div class="sh-steps">
-          <div class="sh-step"><b>1</b><div><button class="sh-big" data-act="token-page">Create my key on GitHub</button><div class="sh-note">On the page that opens, set Expiration to “No expiration”, scroll down and press the green <b>Generate token</b> button.</div></div></div>
-          <div class="sh-step"><b>2</b><div><div class="sh-note">Copy the key GitHub shows you and come back here. Mindview signs you in by itself.</div>
-            <form class="pm-form" data-form="token"><input id="sh-input" type="password" placeholder="or paste the key here" autocomplete="off"><button class="pm-ok">Sign in</button></form></div></div>
-        </div>
-        <div class="sh-note"><span class="sh-link" data-act="back">Back</span></div>`;
-    } else {
-      h += '<div class="sh-note">Keep versions of this project and work on it with friends. All you need is a GitHub account.</div>';
-      h += `<button class="sh-big" data-act="${st.clientId ? 'device' : 'token'}">Sign in with GitHub</button>`;
-      h += '<div class="sh-note"><span class="sh-link" data-act="signup">I don’t have an account yet</span></div>';
-    }
-  } else {
-    const who = st.user ? esc(st.user.login) : 'GitHub';
-    if (!st.linked) {
-      h += '<div class="pm-label">Share this project</div>';
-      if (shareView === 'publish') {
-        h += `<div class="sh-note">Puts this project in a private place on your GitHub account. Only people you invite can see it.</div>
-          <form class="pm-form" data-form="publish"><input id="sh-input" maxlength="90" placeholder="Name" value="${esc((doc.name || 'project').trim().replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, ''))}"><button class="pm-ok">Publish</button></form>
-          <div class="sh-note"><span class="sh-link" data-act="back">Back</span></div>`;
-      } else if (shareView === 'open') {
-        h += `<div class="sh-note">Paste the link a friend sent you.</div>
-          <form class="pm-form" data-form="open"><input id="sh-input" placeholder="Link"><button class="pm-ok">Open</button></form>
-          <div class="sh-note"><span class="sh-link" data-act="back">Back</span></div>`;
-      } else {
-        h += `<div class="sh-note">“${esc(doc.name || 'This project')}” is only on this computer.</div>
-          <button class="sh-big" data-act="publish">Share this project</button><button class="sh-big quiet" data-act="open">Open a project shared with me</button>`;
-      }
-    } else {
-      h += `<div class="pm-label">Shared project</div>
-        <div class="sh-row"><span class="sh-grow"><b>${esc(st.slug ? st.slug.owner + '/' + st.slug.repo : st.url || '')}</b></span><span class="sh-link" data-act="copylink">Copy link</span></div>
-        <div class="sh-note">${st.dirty ? 'You have changes that are not shared yet.' : 'Nothing new on this computer. Sync to get what the others did.'}</div>
-        <form class="pm-form" data-form="sync"><input id="sh-input" maxlength="140" placeholder="What changed? (optional)"><button class="pm-ok">Sync</button></form>`;
-      h += '<div class="pm-sep"></div><div class="pm-label">People</div>';
-      if (sharePeople.length) h += `<div class="sh-note">${sharePeople.map(esc).join(', ')}</div>`;
-      h += '<form class="pm-form" data-form="invite"><input id="sh-invite" placeholder="GitHub username of a friend"><button class="pm-ok">Invite</button></form><div class="sh-note">Then send them the link. They open it with Share, “Open a project shared with me”.</div>';
-      h += '<div class="pm-sep"></div><div class="pm-label">Versions</div><div class="sh-hist">';
-      h += shareHist.length ? shareHist.map((c, i) => `<div class="sh-ver"><span class="sh-msg">${esc(c.message.split('\n')[0])}</span><span class="sh-meta">${esc(c.author)} · ${ago(c.time)}</span>${i ? `<span class="sh-link" data-act="restore" data-oid="${c.oid}">Restore</span>` : ''}</div>`).join('') : '<div class="sh-note">Loading…</div>';
-      h += '</div><div class="pm-sep"></div>';
-      const mine = !!(st.slug && st.user && st.user.login.toLowerCase() === st.slug.owner.toLowerCase()); // only the person who shared it can delete it
-      h += shareView === 'unlink'
-        ? (mine
-          ? '<div class="pm-confirm sh-stop"><span>Stop sharing this project? Your notes stay on this computer. Do you also want to delete the copy on GitHub? Deleting removes it for everyone you invited and cannot be undone.</span><button data-act="unlink-yes">Stop, keep the copy</button><button class="pm-danger" data-act="delete-yes">Stop and delete it</button><button data-act="back">Cancel</button></div>'
-          : '<div class="pm-confirm"><span>Stop syncing this project on this computer? Your notes stay, and so does the copy on GitHub.</span><button class="pm-danger" data-act="unlink-yes">Stop sharing</button><button data-act="back">Cancel</button></div>')
-        : '<div class="sh-row"><span class="sh-link" data-act="open">Open a project shared with me</span><span class="sh-grow"></span><span class="sh-link" data-act="unlink">Stop sharing</span></div>';
-      if (shareView === 'open') h += `<form class="pm-form" data-form="open"><input id="sh-input2" placeholder="Link"><button class="pm-ok">Open</button></form>`;
-    }
-    h += `<div class="pm-sep"></div><div class="sh-row"><span class="sh-grow">Signed in as <b>${who}</b></span><span class="sh-link" data-act="signout">Sign out</span></div>`;
   }
   const keep = document.activeElement && shareMenu.contains(document.activeElement) && document.activeElement.id ? { id: document.activeElement.id, v: document.activeElement.value } : null;
   shareMenu.innerHTML = msg + h;
   if (keep && $('#' + keep.id)) { $('#' + keep.id).value = keep.v; $('#' + keep.id).focus(); }
 }
 const underButton = (menu, btn) => { menu.style.right = 'auto'; menu.style.left = Math.max(8, Math.min(btn.getBoundingClientRect().left, innerWidth - menu.offsetWidth - 8)) + 'px'; };
-function openShare() { shareView = null; shareMsg = null; shareMenu.hidden = false; underButton(shareMenu, $('#btn-share')); $('#btn-share').classList.add('open'); paintShare(); refreshShare().then(() => { if (shareState.linked) shareCall('people', currentId).then(p => { sharePeople = p; if (!shareMenu.hidden) paintShare(); }).catch(() => {}); }); }
+function openShare() { shareView = null; shareMsg = null; shareMenu.hidden = false; underButton(shareMenu, $('#btn-share')); $('#btn-share').classList.add('open'); paintShare(); refreshShare(); }
 function closeShare() { shareMenu.hidden = true; $('#btn-share').classList.remove('open'); }
-function stopDevice() { clearTimeout(sharePoll); sharePoll = 0; shareDevice = null; }
 async function shareDo(text, fn) {
   shareMsg = null;
-  try { await shareBusyWhile(text, fn); } catch (e) { shareMsg = { err: e.message }; if (e.code === 'AUTH') await shareCall('signOut').catch(() => {}); }
+  try { await shareBusyWhile(text, fn); } catch (e) { shareMsg = { err: e.message }; }
   shareView = shareMsg && shareMsg.err ? shareView : null;
   if (!(shareMsg && shareMsg.err) && document.activeElement && shareMenu.contains(document.activeElement)) document.activeElement.blur(); // done: clear the field
   await refreshShare(); paintShare();
 }
-// Back from GitHub with a freshly copied key: sign in with it, no pasting needed.
-let shareKeyWait = false;
-window.addEventListener('focus', async () => {
-  if (!shareKeyWait || shareMenu.hidden || shareView !== 'token' || (shareState && shareState.signedIn)) return;
-  let key = ''; try { key = await shareCall('clipKey'); } catch (_) {}
-  if (key) { shareKeyWait = false; shareForms.token(key); }
-});
 const shareActions = {
   back: () => { shareView = null; shareMsg = null; paintShare(); },
   'live-start': () => shareDo('Going live…', async () => { flushForShare(); const r = await shareCall('liveStart', currentId); await shareCall('copy', r.link); shareMsg = { ok: 'Live. The link is copied: send it to the people you work with.' }; }),
@@ -2950,51 +2881,9 @@ const shareActions = {
   'live-stop': () => { shareView = 'live-stop'; paintShare(); },
   'live-stop-here': () => shareDo('Stopping…', async () => { await shareCall('liveStop', currentId); }),
   'live-end': () => shareDo('Stopping…', async () => { await shareCall('liveEnd', currentId); }),
-  token: () => { shareView = 'token'; paintShare(); },
-  signup: () => shareCall('openUrl', 'https://github.com/signup'),
-  copylink: async () => { if (!shareState.url) return; await shareCall('copy', shareState.url); shareMsg = { ok: 'Link copied. Send it to the people you invited.' }; paintShare(); },
-  publish: () => { shareView = 'publish'; paintShare(); const i = $('#sh-input'); if (i) { i.focus(); i.select(); } },
-  open: () => { shareView = 'open'; paintShare(); const i = $('#sh-input') && $('#sh-input').closest('[data-form="open"]') ? $('#sh-input') : $('#sh-input2'); if (i) i.focus(); },
-  unlink: () => { shareView = 'unlink'; paintShare(); },
-  'delete-yes': () => shareDo('Deleting…', async () => { const r = await shareCall('remove', currentId); shareHist = []; sharePeople = []; shareMsg = { ok: 'Sharing stopped and the copy on GitHub is deleted. Your notes are still here.' }; }),
-  'token-page': () => { shareKeyWait = true; shareCall('openUrl', 'https://github.com/settings/tokens/new?scopes=repo,delete_repo&description=Mindview'); },
-  repo: () => shareState.url && shareCall('openUrl', shareState.url),
-  'device-open': () => shareDevice && shareCall('openUrl', shareDevice.url),
-  'device-cancel': () => { stopDevice(); paintShare(); },
-  device: async () => {
-    shareMsg = null;
-    try { shareDevice = await shareCall('deviceStart'); } catch (e) { shareMsg = { err: e.message }; paintShare(); return; }
-    paintShare(); shareCall('copy', shareDevice.userCode); shareCall('openUrl', shareDevice.url);
-    let wait = shareDevice.interval * 1000; const dev = shareDevice;
-    const tick = async () => {
-      if (shareDevice !== dev) return;
-      try { const r = await shareCall('devicePoll', dev.deviceCode); if (r.user) { stopDevice(); shareMsg = { ok: 'Signed in as ' + r.user.login + '.' }; await refreshShare(); paintShare(); return; } if (r.slow) wait += 5000; }
-      catch (e) { stopDevice(); shareMsg = { err: e.message }; paintShare(); return; }
-      sharePoll = setTimeout(tick, wait);
-    };
-    sharePoll = setTimeout(tick, wait);
-  },
-  signout: async () => { stopDevice(); await shareCall('signOut'); shareMsg = null; shareView = null; await refreshShare(); paintShare(); },
-  'unlink-yes': () => shareDo('Stopping…', async () => { await shareCall('unlink', currentId); shareHist = []; sharePeople = []; }),
-  restore: el => shareDo('Restoring…', async () => { flushForShare(); await shareCall('restore', currentId, el.dataset.oid); reloadAfterShare(); shareMsg = { ok: 'That version is back on your canvas. Sync to share it with the others.' }; }),
 };
 const shareForms = {
   livejoin: v => shareDo('Joining…', async () => { flushForShare(); const r = await shareCall('liveJoin', v); openProject(r.id); shareMsg = { ok: r.already ? 'You already have this project. Switched to it.' : 'Joined “' + (r.name || r.id) + '”.' }; }),
-  token: v => shareDo('Signing in…', async () => { const u = await shareCall('signInToken', v); shareMsg = { ok: 'Signed in as ' + u.login + '.' }; }),
-  publish: v => shareDo('Sharing…', async () => { flushForShare(); const r = await shareCall('publish', currentId, { name: v }); shareMsg = { ok: 'Shared. Invite a friend below and send them the link.' }; }),
-  open: v => shareDo('Opening…', async () => { flushForShare(); const r = await shareCall('openShared', v); openProject(r.id); shareMsg = { ok: r.already ? 'You already have this project. Switched to it.' : 'Opened “' + (r.name || r.id) + '”.' }; }),
-  sync: v => shareDo('Syncing…', async () => {
-    flushForShare();
-    const r = await shareCall('sync', currentId, v);
-    if (r.changed) reloadAfterShare();
-    const parts = [];
-    if (r.incoming) parts.push(`Got ${r.incoming} change${r.incoming > 1 ? 's' : ''} from the others.`);
-    if (r.pushed) parts.push('Your changes are shared.');
-    if (!parts.length) parts.push('Everything is already up to date.');
-    if (r.conflicts.length) parts.push(`${r.conflicts.length} edit${r.conflicts.length > 1 ? 's' : ''} clashed, yours were kept: ${[...new Set(r.conflicts.map(c => '“' + c.what + '”'))].slice(0, 4).join(', ')}.`);
-    shareMsg = { ok: parts.join(' ') };
-  }),
-  invite: v => shareDo('Inviting…', async () => { const r = await shareCall('invite', currentId, v); shareMsg = { ok: `Invited ${v.replace(/^@/, '')}. They open it with Share > Open a shared project > ${r.spec}` }; sharePeople = await shareCall('people', currentId).catch(() => sharePeople); }),
 };
 $('#btn-share').addEventListener('click', e => { e.stopPropagation(); if (shareMenu.hidden) openShare(); else closeShare(); });
 shareMenu.addEventListener('pointerdown', e => e.stopPropagation());
@@ -3003,8 +2892,7 @@ shareMenu.addEventListener('click', e => { const el = e.target.closest('[data-ac
 shareMenu.addEventListener('submit', e => {
   e.preventDefault();
   const f = e.target.closest('form'), v = (f.querySelector('input').value || '').trim();
-  if (!v && f.dataset.form !== 'sync') return;
-  if (shareForms[f.dataset.form]) shareForms[f.dataset.form](v);
+  if (v && shareForms[f.dataset.form]) shareForms[f.dataset.form](v);
 });
 document.addEventListener('pointerdown', e => { if (!shareMenu.hidden && !e.target.closest('#share-menu, #btn-share')) closeShare(); });
 
@@ -3184,7 +3072,7 @@ function openProject(id) {
     render(); scheduleSave();
   }
   if (!doc.viewSet) requestAnimationFrame(() => { fitAll(false); doc.viewSet = true; });
-  setTimeout(() => { if (host && host.share) refreshShare(); }, 0); // the Share button shows a dot when this project has unshared changes
+  setTimeout(() => { if (host && host.share) refreshShare(); }, 0);
   refreshMods(); applyThemeMode(); syncMods().then(() => { modEmit('open', doc); checkMissingMods(); });
 }
 

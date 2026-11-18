@@ -18,17 +18,19 @@ Everything a person makes stays outside the app folder, in `Documents\Mindview`:
 
 - `projects\<id>.json`: one file per project (the notes).
 - `mods\<id>.js`: mods the person made or added.
-- `settings.json`, `images\`, `backups\`, `repos\` (working copies of shared projects), `update\` (a downloaded update waiting to be applied).
+- `settings.json`, `images\`, `backups\`, `live\` (the live sync state of each live project), `update\` (a downloaded update waiting to be applied).
 
 Never put a person's projects, settings or sign-in data into this repository. It is public.
 
 ## This repository (`Attrom/mindview`)
 
 - `main` branch: the source.
-  - `src/main.js`: main process (files, windows, sharing, mods, update check). Holds `const BUILD = N;`, the version number.
+  - `src/main.js`: main process (files, windows, live sync, mods, update check). Holds `const BUILD = N;`, the version number.
   - `src/app.js`, `src/index.html`, `src/style.css`: the window (canvas, notes, menus).
   - `src/preload.js`: the bridge, exposed to the window as `window.desktop`.
-  - `src/share.js`: sharing projects through GitHub. `src/mcp-server.js`: the tools Mindview offers to AI assistants.
+  - `src/live.js`: live sync (Share > Live): a project kept the same on every computer with its link, through Mindview's
+    Supabase server, no sign-in. `src/merge.js` combines two people's edits. `supabase/live.sql` is the server side.
+  - `src/mcp-server.js`: the tools Mindview offers to AI assistants.
   - `src/mods/`: mods and themes that ship inside the app, and `HOW-TO-WRITE-A-MOD.md`.
   - `mods/`: the shared mod Library. Every `<id>.js` here appears in everyone's Mindview under Mods > Library.
   - `tools/pack.js`: builds the app file.
@@ -125,7 +127,8 @@ open a pull request and stop there.
 - A project file may carry data from mods you do not know (`n.mod`, `doc.modData`). Always keep it.
 - To test the update check without touching a real install, set `MINDVIEW_UPDATE_URL` (a folder address serving
   `version.json` and `app.asar`) and `MINDVIEW_UPDATE_TARGET` (the file to replace) before `npm start`.
-- GitHub sign-in for sharing uses the built-in client ID in `src/main.js`. It is public by design; there is no secret to add.
+- The live server address and key in `src/main.js` are public by design: the server only answers for a room whose secret
+  name you know. To test live sync with two copies on one PC, start each with its own `MINDVIEW_DATA_DIR`.
 
 ## When you finish a job
 
