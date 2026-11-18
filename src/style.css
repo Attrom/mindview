@@ -471,9 +471,10 @@ kbd {
 .node .body-mark {
   position: absolute; right: .45em; top: .45em; padding: .25em; border-radius: .3em;
   color: var(--c); opacity: .85; line-height: 0; cursor: pointer;
-  transition: opacity .15s, background .15s;
+  transition: opacity .15s, color .15s;
 }
-.node .body-mark:hover { opacity: 1; background: color-mix(in srgb, var(--text) 10%, transparent); }
+.node .body-mark:hover { opacity: 1; color: var(--text); }
+.node .body-mark:active { opacity: 1; color: var(--accent); }
 .node.pinned > .body-mark { opacity: 1; }
 .node .body-mark svg { width: 1em; height: 1em; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; }
 .node.notext .body-mark { opacity: 0; pointer-events: none; }
