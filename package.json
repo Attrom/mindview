@@ -7,6 +7,7 @@
   "author": "Attrom",
   "license": "UNLICENSED",
   "dependencies": {
+    "@supabase/realtime-js": "^2.119.1",
     "isomorphic-git": "^1.44.12"
   },
   "scripts": {

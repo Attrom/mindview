@@ -963,3 +963,7 @@ body.ai-mode #viewport { box-shadow: inset 0 0 0 2px var(--accent); }
 .node.nb-open > .pin-body { visibility: hidden; }
 .node.pinned > .nb-shell { min-height: calc(100% + 2 * var(--bw, 1.5px)); }
 .node.notext > .pin-body { opacity: 0; }
+
+/* live sync state in the Share menu */
+#share-menu .lv-dot { display: inline-block; width: 7px; height: 7px; margin-right: 7px; border-radius: 50%; background: var(--text-faint); vertical-align: 1px; }
+#share-menu .lv-dot.on { background: #3fb950; }

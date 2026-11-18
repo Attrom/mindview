@@ -230,6 +230,9 @@ function load(id) {
       if (d && d.nodes) doc = Object.assign(doc, d);
     } catch (e) { console.error('Could not read board', e); }
   }
+  normalizeDoc();
+}
+function normalizeDoc() {
   doc.view = doc.view || { x: 0, y: 0, k: 1 };
   if (!doc.sections || typeof doc.sections !== 'object') doc.sections = {};
   for (const sec of Object.values(doc.sections)) {
@@ -256,7 +259,7 @@ function unifySiblingSizes() {
 }
 const siblingsOf = n => (n.parentId && N(n.parentId) ? all().filter(o => o.parentId === n.parentId) : [n]);
 
-let saveTimer = null;
+let saveTimer = null, liveHold = 0, liveState = null;
 const saveState = $('#save-state');
 function scheduleSave() {
   saveState.textContent = 'Saving…'; saveState.className = 'save-state saving';
@@ -265,6 +268,7 @@ function scheduleSave() {
 }
 async function saveNow() {
   clearTimeout(saveTimer); saveTimer = null;
+  if (liveHold) { saveTimer = setTimeout(saveNow, 200); return; } // the others' changes are being combined with this
   try {
     if (!currentId) return;
     doc.updated = Date.now();
@@ -2812,7 +2816,34 @@ async function shareBusyWhile(text, fn) {
 // everything on screen goes to disk first, so the shared copy is made from what you see
 function flushForShare() { if (editingId) finishEditing(true); clearTimeout(saveTimer); saveTimer = null; doc.updated = Date.now(); store.saveSync(currentId, serialize()); saveState.textContent = 'Saved'; saveState.className = 'save-state'; }
 function reloadAfterShare() { openProject(currentId); }
+/* live sync (main process, live.js): what the others change comes in while you work */
+// main asks for what is on screen before it combines it with the others' changes; saving waits until liveApply
+function liveTake(id) {
+  if (id !== currentId) return 'closed';
+  if (editingId || editingSection || dragState || (document.activeElement && document.activeElement.isContentEditable)) return 'busy';
+  clearTimeout(saveTimer); saveTimer = null;
+  clearTimeout(liveHold); liveHold = setTimeout(() => { liveHold = 0; }, 3000);
+  return serialize();
+}
+function liveApply(id, text) {
+  clearTimeout(liveHold); liveHold = 0;
+  if (id !== currentId) return;
+  const d = JSON.parse(text);
+  const keep = { view: doc.view, viewSet: doc.viewSet };
+  for (const k of Object.keys(doc)) if (!(k in d)) delete doc[k];
+  Object.assign(doc, d, keep);
+  normalizeDoc();
+  touch();
+  if (selectedId && !N(selectedId)) selectedId = null;
+  if (selectedLink && !linkById(selectedLink)) selectedLink = null;
+  if (selectedSection && !SEC(selectedSection)) selectedSection = null;
+  render(); fromCanon(); render();
+  paintProjectName();
+  saveState.textContent = 'Saved'; saveState.className = 'save-state';
+}
+function liveChanged(id) { if (id === currentId) refreshShare(); }
 async function refreshShare() {
+  try { liveState = await shareCall('liveStatus', currentId); } catch (_) { liveState = null; }
   try { shareState = await shareCall('status', currentId); } catch (e) { shareState = { signedIn: false, linked: false }; shareMsg = { err: e.message }; }
   $('#share-dot').hidden = !(shareState.linked && shareState.dirty);
   if (shareState.linked && !shareMenu.hidden) { shareCall('history', currentId).then(h => { shareHist = h; if (!shareMenu.hidden) paintShare(); }).catch(() => {}); }
@@ -2822,6 +2853,18 @@ const ago = t => { const s = (Date.now() - t) / 1000; return s < 90 ? 'just now'
 function paintShare() {
   const st = shareState || {}; let h = '';
   const msg = shareMsg ? `<div class="${shareMsg.err ? 'sh-err' : 'sh-ok'}">${esc(shareMsg.err || shareMsg.ok)}</div>` : '';
+  if (host && host.share) {
+    const lv = liveState || {};
+    h += '<div class="pm-label">Live</div>';
+    if (lv.live) {
+      h += `<div class="sh-row"><span class="sh-grow"><span class="lv-dot${lv.connected ? ' on' : ''}"></span>${lv.connected ? 'Live' : 'Connecting…'}</span><span class="sh-link" data-act="live-copy">Copy link</span>${shareView === 'live-stop' ? '' : '<span class="sh-link" data-act="live-stop">Stop</span>'}</div>`;
+      if (shareView === 'live-stop') h += '<div class="pm-confirm sh-stop"><span>Stop live sync?</span><button data-act="live-stop-here">Only here</button><button class="pm-danger" data-act="live-end">For everyone</button><button data-act="back">Cancel</button></div>';
+    } else if (shareView === 'live-join') {
+      h += `<form class="pm-form" data-form="livejoin"><input id="sh-live" placeholder="Live link"><button class="pm-ok">Join</button></form>
+        <div class="sh-note"><span class="sh-link" data-act="back">Back</span></div>`;
+    } else h += '<button class="sh-big" data-act="live-start">Go live</button><button class="sh-big quiet" data-act="live-join">Join with a link</button>';
+    h += '<div class="pm-sep"></div>';
+  }
   if (!host || !host.share) h = '<div class="sh-note" style="padding-top:8px">Sharing works in the desktop app.</div>';
   else if (!st.signedIn) {
     h += '<div class="pm-label">Share with GitHub</div>';
@@ -2901,6 +2944,12 @@ window.addEventListener('focus', async () => {
 });
 const shareActions = {
   back: () => { shareView = null; shareMsg = null; paintShare(); },
+  'live-start': () => shareDo('Going live…', async () => { flushForShare(); const r = await shareCall('liveStart', currentId); await shareCall('copy', r.link); shareMsg = { ok: 'Live. The link is copied: send it to the people you work with.' }; }),
+  'live-copy': async () => { if (!liveState || !liveState.link) return; await shareCall('copy', liveState.link); shareMsg = { ok: 'Link copied.' }; paintShare(); },
+  'live-join': () => { shareView = 'live-join'; paintShare(); const i = $('#sh-live'); if (i) i.focus(); },
+  'live-stop': () => { shareView = 'live-stop'; paintShare(); },
+  'live-stop-here': () => shareDo('Stopping…', async () => { await shareCall('liveStop', currentId); }),
+  'live-end': () => shareDo('Stopping…', async () => { await shareCall('liveEnd', currentId); }),
   token: () => { shareView = 'token'; paintShare(); },
   signup: () => shareCall('openUrl', 'https://github.com/signup'),
   copylink: async () => { if (!shareState.url) return; await shareCall('copy', shareState.url); shareMsg = { ok: 'Link copied. Send it to the people you invited.' }; paintShare(); },
@@ -2930,6 +2979,7 @@ const shareActions = {
   restore: el => shareDo('Restoring…', async () => { flushForShare(); await shareCall('restore', currentId, el.dataset.oid); reloadAfterShare(); shareMsg = { ok: 'That version is back on your canvas. Sync to share it with the others.' }; }),
 };
 const shareForms = {
+  livejoin: v => shareDo('Joining…', async () => { flushForShare(); const r = await shareCall('liveJoin', v); openProject(r.id); shareMsg = { ok: r.already ? 'You already have this project. Switched to it.' : 'Joined “' + (r.name || r.id) + '”.' }; }),
   token: v => shareDo('Signing in…', async () => { const u = await shareCall('signInToken', v); shareMsg = { ok: 'Signed in as ' + u.login + '.' }; }),
   publish: v => shareDo('Sharing…', async () => { flushForShare(); const r = await shareCall('publish', currentId, { name: v }); shareMsg = { ok: 'Shared. Invite a friend below and send them the link.' }; }),
   open: v => shareDo('Opening…', async () => { flushForShare(); const r = await shareCall('openShared', v); openProject(r.id); shareMsg = { ok: r.already ? 'You already have this project. Switched to it.' : 'Opened “' + (r.name || r.id) + '”.' }; }),

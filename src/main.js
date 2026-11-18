@@ -5,9 +5,10 @@ const path = require('path');
 const fs = require('fs');
 
 // Where notes live: Documents\Mindview when installed, next to the project in development.
-const dataDir = app.isPackaged
-  ? path.join(app.getPath('documents'), 'Mindview')
+const dataDir = process.env.MINDVIEW_DATA_DIR ? path.resolve(process.env.MINDVIEW_DATA_DIR) // for tests: two copies side by side
+  : app.isPackaged ? path.join(app.getPath('documents'), 'Mindview')
   : path.resolve(__dirname, '..');
+if (process.env.MINDVIEW_DATA_DIR) app.setPath('userData', path.join(dataDir, '.electron'));
 const projectsDir = path.join(dataDir, 'projects');
 const backupDir = path.join(dataDir, 'backups');
 const settingsFile = path.join(dataDir, 'settings.json');
@@ -214,9 +215,9 @@ ipcMain.on('projects:list', e => { e.returnValue = listProjects(); });
 ipcMain.on('project:load', (e, id) => {
   try { e.returnValue = fs.readFileSync(projectFile(id), 'utf8'); } catch { e.returnValue = null; }
 });
-ipcMain.handle('project:save', (_e, id, text) => { writeAtomic(projectFile(id), text); return true; });
+ipcMain.handle('project:save', (_e, id, text) => { writeAtomic(projectFile(id), text); live.saved(id); return true; });
 ipcMain.on('project:saveSync', (e, id, text) => {
-  try { writeAtomic(projectFile(id), text); e.returnValue = true; } catch { e.returnValue = false; }
+  try { writeAtomic(projectFile(id), text); live.saved(id); e.returnValue = true; } catch { e.returnValue = false; }
 });
 ipcMain.on('project:create', (e, name) => { e.returnValue = createProject(name); });
 ipcMain.on('project:delete', (e, id) => {
@@ -225,6 +226,7 @@ ipcMain.on('project:delete', (e, id) => {
     const dir = path.join(backupDir, 'deleted');
     fs.mkdirSync(dir, { recursive: true });
     fs.renameSync(projectFile(id), path.join(dir, `${id}-${Date.now()}.json`));
+    live.forgetProject(id);
     e.returnValue = true;
   } catch { e.returnValue = false; }
 });
@@ -385,10 +387,27 @@ const shareApi = {
   copy: text => { clipboard.writeText(String(text || '')); return true; },
   openUrl: url => { if (/^https:\/\/(www\.)?github\.com\//.test(String(url))) shell.openExternal(url); return true; },
 };
+/* live sync (see live.js): a project kept the same on every computer with its link, as people work. No sign-in.
+   The address and key are the public ones of Mindview's live server; the server only answers for rooms you know the name of. */
+const LIVE_URL = process.env.MINDVIEW_LIVE_URL || 'https://fslesctsfaoftckbeiuj.supabase.co';
+const LIVE_KEY = process.env.MINDVIEW_LIVE_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZzbGVzY3RzZmFvZnRja2JlaXVqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTQzOTY2MTQsImV4cCI6MjEwOTk3MjYxNH0.sDNgxq9HdDPDm2yecHZ5PJQG9mNeNgwYjBAUWsHCD9I';
+const { createLive } = require('./live');
+const live = createLive({
+  dataDir, projectsDir, imagesDir, url: LIVE_URL, key: LIVE_KEY,
+  page: code => inPage(code),
+  onChange: id => inPage(`liveChanged(${JSON.stringify(id)})`).catch(() => {}),
+});
+Object.assign(shareApi, {
+  liveStatus: id => live.status(id),
+  liveStart: id => live.start(id),
+  liveJoin: link => live.join(link, slugify),
+  liveStop: id => live.stop(id),
+  liveEnd: id => live.end(id),
+});
 ipcMain.handle('share:call', async (_e, method, ...args) => {
   try {
     if (!Object.prototype.hasOwnProperty.call(shareApi, method)) throw new Error('unknown');
-    if (['status', 'publish', 'sync', 'history', 'restore', 'invite', 'people', 'unlink'].includes(method) && !validId(args[0])) throw new Error('bad project id');
+    if (['status', 'liveStatus', 'liveStart', 'liveStop', 'liveEnd', 'publish', 'sync', 'history', 'restore', 'invite', 'people', 'unlink'].includes(method) && !validId(args[0])) throw new Error('bad project id');
     return { ok: await shareApi[method](...args) };
   } catch (e) { console.error('share', method, e); return { error: String(e && e.message || e), code: e && e.code }; }
 });
@@ -412,6 +431,7 @@ async function mcpLive(tool, args) {
   try { open = await inPage('flushForShare(), currentId'); } catch { /* window busy: work on the file as it is */ }
   const r = mcpOps.call(tool, args, true);
   try {
+    if (r.changed) live.saved(r.changed);
     if (r.changed && r.changed === open) await inPage('reloadAfterShare()');
     if (r.mod) await inPage(`aiModSaved(${JSON.stringify(r.mod.id)}, ${JSON.stringify(r.mod.project)})`);
     for (const d of r.requestsDone || []) await inPage(`aiRequestDone(${JSON.stringify(d.id)}, ${JSON.stringify(d.summary || 'Done.')})`);
@@ -649,6 +669,7 @@ app.whenReady().then(() => {
   dailyBackups();
   createWindow();
   startMcpBridge();
+  win.webContents.once('did-finish-load', () => live.startAll());
   setTimeout(checkUpdate, 4000);
 });
 
