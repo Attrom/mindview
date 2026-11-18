@@ -194,7 +194,7 @@ function toggleFold(id) {
   return true;
 }
 function kidsP(n) {
-  if (doc.folds && doc.folds.includes(n.id)) return 0;
+  if (doc.folds) for (let m = n, g = 0; m && g < 60; g++, m = m.parentId && N(m.parentId)) if (doc.folds.includes(m.id)) return 0; // folded here or above
   const d = depthOf(n) + 1;
   if (forcedDepth !== null || !focusId || !N(focusId)) return levelP(d);
   const fd = depthOf(N(focusId));
