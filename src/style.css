@@ -289,6 +289,8 @@ kbd {
   opacity: var(--p, 1); scale: calc(.85 + .15 * var(--p, 1)); /* a level pops in once readable */
 }
 .node.zhide { visibility: hidden; pointer-events: none; transition: opacity .12s, scale .12s, visibility 0s .12s; }
+/* folded by hand: the notes shrink into the +N badge as they slide to it (and grow back out of it) */
+.node.folding { opacity: 0; scale: .3; pointer-events: none; transition: opacity .36s ease-in, scale .38s var(--ease); }
 
 /* badges and handles grow with their note when zoomed out */
 .node .fold, .node .handle, .node .jump { zoom: var(--s); }

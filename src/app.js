@@ -190,9 +190,16 @@ function toggleFold(id) {
   if (on) doc.folds.push(id);
   if (!doc.folds.length) delete doc.folds;
   if (on && selectedId && selectedId !== id && isAncestor(id, selectedId)) select(id); // what was selected just folded away
+  // the notes shrink into the +N as they slide to it (folding), or grow out of it as they slide back (unfolding)
+  clearTimeout(foldTimer); folding.clear();
+  const under = descendants(id).filter(c => els[c] && (on ? !goneNow.has(c) && !els[c].classList.contains('zhide') : true));
+  for (const c of under) folding.add(c);
   render(); relayout(); scheduleSave();
+  if (on) foldTimer = setTimeout(() => { folding.clear(); render(); sweepGone(); }, 400);
+  else { for (const c of under) if (els[c]) els[c].getBoundingClientRect(); requestAnimationFrame(() => requestAnimationFrame(() => { folding.clear(); for (const c of under) if (els[c]) els[c].classList.remove('folding'); })); }
   return true;
 }
+const folding = new Set(); let foldTimer = 0;
 function kidsP(n) {
   if (doc.folds) for (let m = n, g = 0; m && g < 60; g++, m = m.parentId && N(m.parentId)) if (doc.folds.includes(m.id)) return 0; // folded here or above
   const d = depthOf(n) + 1;
@@ -434,7 +441,7 @@ function paintText() {
 function paintLevels() {
   for (const n of all()) {
     const el = els[n.id]; if (!el) continue;
-    const pinned = n.id === editingId || n.id === freshId;
+    const pinned = n.id === editingId || n.id === freshId || folding.has(n.id);
     const pv = pinned ? 1 : pOf(n) >= 1 ? 1 : 0; // a level pops in once fully unfolded (no half-faded stage)
     if (goneNow.has(n.id)) continue; // off the page
     el.style.setProperty('--p', pv);
@@ -596,9 +603,10 @@ function renderNode(n, el) {
   el.classList.toggle('msel', multi.has(n.id));
   const folded = kids.length > 0 && kidsP(n) < 1; // +N stays until the children have fully unfolded
   el.classList.toggle('collapsed', folded && !foldedByHand(n.id)); // the stacked-card look hints at notes the zoom folded; folded by hand they are simply gone
-  const pv = n.id === editingId || n.id === freshId ? 1 : pOf(n) >= 1 ? 1 : 0;
+  const pv = n.id === editingId || n.id === freshId || folding.has(n.id) ? 1 : pOf(n) >= 1 ? 1 : 0;
   el.style.setProperty('--p', pv);
   el.classList.toggle('zhide', pv <= 0);
+  el.classList.toggle('folding', folding.has(n.id));
   const c = colorOf(n);
   if (c) el.style.setProperty('--c', c); else el.style.removeProperty('--c');
   el.style.left = n.x + 'px';
@@ -1883,6 +1891,13 @@ function layoutTargets(onlyId) {
   };
   const gapsSum = (pid, kids) => { let g = 0; for (let i = 0; i < kids.length - 1; i++) g += gapAfter(pid, kids, i); return g; };
   const tuck = (id, at) => { for (const c of kidsMap[id] || NONE) { pos[c.id] = { x: at.x, y: at.y }; tuck(c.id, at); } };
+  // folded by hand: the notes go into the +N badge (centred on it), and come back out of it
+  const tuckBadge = (id, p) => {
+    const s = size(id), bx = p.x + s.w + 30 * (scaleNow[id] || 1), by = p.y + s.h / 2;
+    // all on the same spot, a pixel apart in their order, so they come back out in the order they went in
+    const walk = pid => kidsOf(pid).forEach((c, i) => { pos[c.id] = { x: bx - 40, y: by - 15 + i }; walk(c.id); });
+    walk(id);
+  };
   // a section dragged away from its tree's layout carries an offset (ox, oy); its notes are placed shifted by it
   const noOff = { x: 0, y: 0 }, anySec = allSections().length > 0;
   const off = id => { if (!anySec) return noOff; let x = 0, y = 0, sid = N(id) && secOf(N(id)), sec = sid && SEC(sid), g = 0; while (sec && g++ < 20) { x += sec.ox || 0; y += sec.oy || 0; sec = sec.parent && SEC(sec.parent); } return { x, y }; };
@@ -1908,7 +1923,7 @@ function layoutTargets(onlyId) {
     if (n0.parentId && N(n0.parentId)) { const a = nudgeOf(n0); x += a.x; top += a.y; lastNudgeY[id] = a.y; } // moved by hand at this zoom level
     const s = size(id), p = pk(id);
     pos[id] = { x, y: top + (sub[id] - s.h) / 2 };
-    if (!visKids(id).length) { tuck(id, pos[id]); return; } // folded away behind their parent
+    if (!visKids(id).length) { if (foldedByHand(id)) tuckBadge(id, pos[id]); else tuck(id, pos[id]); return; } // folded away behind their parent
     const cx = x + Math.max(s.w, roomW(id)) + gx(id) * (0.45 + 0.55 * p);
     // detached kids that moved together (same offset) stack as their own group, centred on the parent
     const groups = {};
