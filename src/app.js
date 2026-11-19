@@ -595,7 +595,7 @@ function renderNode(n, el) {
   el.classList.toggle('selected', n.id === selectedId);
   el.classList.toggle('msel', multi.has(n.id));
   const folded = kids.length > 0 && kidsP(n) < 1; // +N stays until the children have fully unfolded
-  el.classList.toggle('collapsed', folded);
+  el.classList.toggle('collapsed', folded && !foldedByHand(n.id)); // the stacked-card look hints at notes the zoom folded; folded by hand they are simply gone
   const pv = n.id === editingId || n.id === freshId ? 1 : pOf(n) >= 1 ? 1 : 0;
   el.style.setProperty('--p', pv);
   el.classList.toggle('zhide', pv <= 0);
