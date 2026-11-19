@@ -589,7 +589,7 @@ ipcMain.handle('mcp:remove', (_e, id) => {
 /* ---------- updates ----------
    A newer app.asar is fetched from the updates branch of the home repository, checked against its
    published sha256, kept in <data>\update, and put in place when Mindview closes or next starts. */
-const BUILD = 97;
+const BUILD = 98;
 const ofs = require('original-fs'); // plain file access: Electron's fs would treat app.asar as a folder
 const updateUrl = process.env.MINDVIEW_UPDATE_URL || `https://raw.githubusercontent.com/${HOME_REPO}/updates/`;
 const liveAsar = process.env.MINDVIEW_UPDATE_TARGET || path.join(process.resourcesPath, 'app.asar');
